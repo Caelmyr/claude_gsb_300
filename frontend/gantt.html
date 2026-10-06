@@ -37,6 +37,7 @@
       <div class="flex">
         <h2 style="margin:0" id="chart-title">甘特图</h2>
         <div class="spacer"></div>
+        <span class="badge warn" id="sol-stale" style="display:none"></span>
         <span class="badge info" id="sol-meta"></span>
       </div>
       <div id="gantt-container"></div>
@@ -55,6 +56,7 @@
 <script>
 let problem = null;
 let solution = null;
+let staleMap = {};
 const quickSel = document.getElementById('quick-solver');
 quickSel.innerHTML = SOLVER_NAMES.map(n => `<option value="${n}" ${n === 'genetic' ? 'selected' : ''}>${SOLVER_LABELS[n]}</option>`).join('');
 
@@ -69,9 +71,11 @@ async function load() {
 
 async function loadSolutions(preferred) {
   const { solutions } = await api(`/problems/${problem.id}/solutions`);
+  const st = await fetchStaleness(problem.id).catch(() => null);
+  staleMap = st ? stalenessIndex(st) : {};
   const sel = document.getElementById('solution-picker');
   sel.innerHTML = solutions.length
-    ? solutions.map(s => `<option value="${s.id}" ${s.id === preferred ? 'selected' : ''}>${escapeHtml(SOLVER_LABELS[s.solver] || s.solver)} · 目标 ${fmt(s.objective_value)} · ${escapeHtml(s.created_at)}</option>`).join('')
+    ? solutions.map(s => `<option value="${s.id}" ${s.id === preferred ? 'selected' : ''}>${staleMap[s.id] && staleMap[s.id].stale ? '⚠ ' : ''}${escapeHtml(SOLVER_LABELS[s.solver] || s.solver)} · 目标 ${fmt(s.objective_value)} · ${escapeHtml(s.created_at)}</option>`).join('')
     : '<option value="">— 暂无求解结果 —</option>';
   if (solutions.length) {
     const id = preferred || solutions[solutions.length - 1].id;
@@ -94,6 +98,15 @@ function render() {
     `甘特图 — ${SOLVER_LABELS[solution.solver] || solution.solver}（${mode === 'task' ? '按任务' : '按资源'}）`;
   document.getElementById('sol-meta').textContent =
     `目标 ${fmt(solution.objective_value)} · 完工时间 ${fmt(solution.makespan)} · ${statusLabel(solution.status)}`;
+  const staleEl = document.getElementById('sol-stale');
+  const staleItem = staleMap[solution.id];
+  if (staleItem && staleItem.stale) {
+    staleEl.style.display = '';
+    staleEl.textContent = '已过期，需重排';
+    staleEl.title = staleItem.reasons.join('；');
+  } else {
+    staleEl.style.display = 'none';
+  }
   renderGantt(document.getElementById('gantt-container'), {
     problem, assignments: solution.assignments, mode,
     title: `排程 — ${SOLVER_LABELS[solution.solver] || solution.solver}`,

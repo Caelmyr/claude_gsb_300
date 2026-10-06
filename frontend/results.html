@@ -30,7 +30,7 @@
       <h2>求解方案</h2>
       <table><thead><tr>
         <th>求解器</th><th>状态</th><th class="num">目标值</th><th class="num">完工时间</th>
-        <th class="num">拖期</th><th class="num">成本</th><th class="num">耗时(s)</th><th></th>
+        <th class="num">拖期</th><th class="num">成本</th><th class="num">耗时(s)</th><th>时效</th><th></th>
       </tr></thead><tbody id="rows"></tbody></table>
     </div>
 
@@ -54,6 +54,7 @@
 let problem = null;
 let solutions = [];
 let selectedId = null;
+let staleMap = {};
 
 initSidebar('results.html');
 
@@ -67,6 +68,8 @@ async function load() {
 async function loadSolutions() {
   const r = await api(`/problems/${problem.id}/solutions`);
   solutions = r.solutions;
+  const st = await fetchStaleness(problem.id).catch(() => null);
+  staleMap = st ? stalenessIndex(st) : {};
   renderTable();
   renderObjectiveChart();
 }
@@ -81,8 +84,9 @@ function renderTable() {
       <td class="num">${fmt(s.metrics?.total_tardiness)}</td>
       <td class="num">${fmt(s.metrics?.resource_cost)}</td>
       <td class="num">${fmt(s.solve_time)}</td>
+      <td>${staleBadge(staleMap[s.id])}</td>
       <td><button class="btn sm" onclick="event.stopPropagation();loadDetail('${s.id}')">查看</button></td>
-    </tr>`).join('') || '<tr><td colspan="8" class="empty">暂无求解结果。</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="9" class="empty">暂无求解结果。</td></tr>';
 }
 
 function renderObjectiveChart() {

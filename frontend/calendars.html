@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>班次日历 — 排程求解系统</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">排程求解系统</div>
+    <div class="brand-sub">运筹优化与排程求解</div>
+    <nav id="nav"></nav>
+    <div class="section-label">问题实例</div>
+    <select id="problem-picker"></select>
+  </aside>
+  <main class="main">
+    <div class="page-head">
+      <h1>班次日历模板</h1>
+      <span class="sub">定义班次 / 周末 / 节假日模板，一键套用到资源并追踪失效结果</span>
+    </div>
+
+    <!-- ======================= 模板列表 ======================= -->
+    <div class="card">
+      <div class="flex">
+        <h2 style="margin:0">模板列表</h2>
+        <div class="spacer"></div>
+        <select id="preset-picker" style="max-width:220px"></select>
+        <button class="btn" onclick="createFromPreset()">从预设创建</button>
+        <button class="btn primary" onclick="showForm()">＋ 新建模板</button>
+      </div>
+      <table class="mt">
+        <thead><tr>
+          <th>名称</th><th>班次</th><th>工作日</th><th class="num">节假日</th>
+          <th class="num">版本</th><th>更新时间</th><th></th>
+        </tr></thead>
+        <tbody id="tpl-rows"></tbody>
+      </table>
+    </div>
+
+    <!-- ======================= 模板编辑 ======================= -->
+    <div class="card" id="form-card" style="display:none">
+      <h2 id="form-title">新建模板</h2>
+      <div class="form-grid">
+        <div><label>名称</label><input id="f-name" placeholder="如 三班倒"></div>
+        <div><label>描述</label><input id="f-desc" placeholder="用途说明"></div>
+        <div><label>日期原点（第 0 时段对应的日期）</label><input id="f-origin" type="date"></div>
+        <div><label>每日时段数（小时制填 24）</label><input id="f-spd" type="number" value="24" min="1"></div>
+        <div class="full"><label>工作日</label><div id="f-workdays" class="flex" style="gap:10px;flex-wrap:wrap"></div></div>
+      </div>
+      <h3>班次窗口（时段为单位，可跨天，如夜班 22 → 30）</h3>
+      <table><thead><tr><th>班次名</th><th class="num">开始</th><th class="num">结束</th><th></th></tr></thead>
+        <tbody id="f-shifts"></tbody></table>
+      <button class="btn sm mt" onclick="addShiftRow()">＋ 添加班次</button>
+      <h3 class="mt">节假日 / 停机区间（含首尾日期）</h3>
+      <table><thead><tr><th>开始日期</th><th>结束日期</th><th></th></tr></thead>
+        <tbody id="f-holidays"></tbody></table>
+      <button class="btn sm mt" onclick="addHolidayRow()">＋ 添加节假日</button>
+      <div class="btn-row mt">
+        <button class="btn primary" onclick="saveForm()">保存模板</button>
+        <button class="btn" onclick="hideForm()">取消</button>
+      </div>
+    </div>
+
+    <!-- ======================= 套用到问题 ======================= -->
+    <div class="card">
+      <h2>套用到当前问题</h2>
+      <div id="apply-body">
+        <div class="form-grid">
+          <div><label>选择模板</label><select id="apply-template"></select></div>
+          <div><label>开始日期（留空 = 从原点起）</label><input id="apply-start" type="date"></div>
+          <div><label>结束日期（留空 = 到计划期末）</label><input id="apply-end" type="date"></div>
+          <div class="full"><label>目标资源</label><div id="apply-resources" class="flex" style="gap:10px;flex-wrap:wrap"></div></div>
+        </div>
+        <div class="btn-row">
+          <button class="btn" onclick="previewApply()">预览生成时段</button>
+          <button class="btn primary" onclick="applyTemplate()">套用并生成可用时段</button>
+        </div>
+        <div id="apply-preview" class="mt small mono"></div>
+      </div>
+      <h3 class="mt">已套用的模板</h3>
+      <table><thead><tr>
+        <th>模板</th><th>资源</th><th>日期范围</th><th>套用时间</th><th>状态</th><th></th>
+      </tr></thead><tbody id="assign-rows"></tbody></table>
+    </div>
+
+    <!-- ======================= 结果时效 ======================= -->
+    <div class="card">
+      <div class="flex">
+        <h2 style="margin:0">结果时效检查</h2>
+        <div class="spacer"></div>
+        <button class="btn sm" onclick="loadStaleness()">重新检查</button>
+      </div>
+      <p class="sub" id="staleness-summary">—</p>
+      <div id="staleness-body"></div>
+    </div>
+  </main>
+</div>
+<script src="js/common.js"></script>
+<script>
+const WEEKDAYS = ['周一','周二','周三','周四','周五','周六','周日'];
+let templates = [];
+let presets = [];
+let problem = null;
+let calState = { version: 0, assignments: [] };
+let editing = null;   // template id being edited, null = new
+
+initSidebar('calendars.html');
+
+/* ============================ 加载 ============================ */
+async function load() {
+  const [tpls, pr] = await Promise.all([
+    api('/calendars'), api('/calendar-presets'),
+  ]);
+  templates = tpls.templates;
+  presets = pr.presets;
+  document.getElementById('preset-picker').innerHTML =
+    presets.map(p => `<option value="${p.key}">${escapeHtml(p.name)}</option>`).join('');
+  renderTemplates();
+  renderTemplatePicker();
+  const pid = currentProblemId();
+  if (pid) {
+    problem = await api('/problems/' + pid);
+    await Promise.all([loadCalState(), loadStaleness()]);
+    renderApplyResources();
+  } else {
+    document.getElementById('apply-body').innerHTML = '<div class="empty">请先在左侧选择问题实例。</div>';
+    document.getElementById('staleness-body').innerHTML = '<div class="empty">未选择问题实例。</div>';
+  }
+}
+
+function renderTemplates() {
+  document.getElementById('tpl-rows').innerHTML = templates.map(t => `
+    <tr>
+      <td><b>${escapeHtml(t.name)}</b><div class="small sub">${escapeHtml(t.description || '')}</div></td>
+      <td class="small">${(t.shifts || []).map(s => `${escapeHtml(s.name)} ${s.start}→${s.end}`).join('<br>')}</td>
+      <td class="small">${(t.workdays || []).map(d => WEEKDAYS[d]).join(' ') || '—'}</td>
+      <td class="num">${(t.holidays || []).length}</td>
+      <td class="num">v${t.version}</td>
+      <td class="small">${escapeHtml(t.updated_at || '')}</td>
+      <td>
+        <button class="btn sm" onclick="editTemplate('${t.id}')">编辑</button>
+        <button class="btn sm" onclick="refreshTemplate('${t.id}')">批量刷新</button>
+        <button class="btn sm danger" onclick="removeTemplate('${t.id}')">删除</button>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="7" class="empty">暂无模板，可新建或从预设创建。</td></tr>';
+}
+
+function renderTemplatePicker() {
+  document.getElementById('apply-template').innerHTML =
+    templates.map(t => `<option value="${t.id}">${escapeHtml(t.name)} (v${t.version})</option>`).join('');
+}
+
+/* ============================ 编辑 ============================ */
+function workdayChecks(selected) {
+  return WEEKDAYS.map((w, i) =>
+    `<label style="font-weight:normal"><input type="checkbox" data-wd="${i}" ${selected.includes(i) ? 'checked' : ''}> ${w}</label>`).join('');
+}
+
+function shiftRow(s = { name: '', start: '', end: '' }) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td><input data-k="name" value="${escapeHtml(s.name)}" placeholder="如 夜班"></td>
+    <td><input data-k="start" type="number" value="${s.start}" style="width:90px"></td>
+    <td><input data-k="end" type="number" value="${s.end}" style="width:90px"></td>
+    <td><button class="btn sm danger" onclick="this.closest('tr').remove()">删</button></td>`;
+  document.getElementById('f-shifts').appendChild(tr);
+}
+
+function holidayRow(r = ['', '']) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td><input data-k="0" type="date" value="${r[0] || ''}"></td>
+    <td><input data-k="1" type="date" value="${r[1] || ''}"></td>
+    <td><button class="btn sm danger" onclick="this.closest('tr').remove()">删</button></td>`;
+  document.getElementById('f-holidays').appendChild(tr);
+}
+
+function addShiftRow() { shiftRow(); }
+function addHolidayRow() { holidayRow(); }
+
+function fillForm(t) {
+  document.getElementById('f-name').value = t.name || '';
+  document.getElementById('f-desc').value = t.description || '';
+  document.getElementById('f-origin').value = t.origin_date || '2026-01-05';
+  document.getElementById('f-spd').value = t.slots_per_day || 24;
+  document.getElementById('f-workdays').innerHTML = workdayChecks(t.workdays ?? [0,1,2,3,4,5,6]);
+  document.getElementById('f-shifts').innerHTML = '';
+  document.getElementById('f-holidays').innerHTML = '';
+  (t.shifts && t.shifts.length ? t.shifts : [{}]).forEach(shiftRow);
+  (t.holidays || []).forEach(holidayRow);
+}
+
+function showForm() {
+  editing = null;
+  document.getElementById('form-title').textContent = '新建模板';
+  fillForm({});
+  document.getElementById('form-card').style.display = 'block';
+}
+
+function editTemplate(id) {
+  const t = templates.find(x => x.id === id);
+  if (!t) return;
+  editing = id;
+  document.getElementById('form-title').textContent = `编辑模板 — ${t.name}（保存后版本 +1，需刷新套用）`;
+  fillForm(t);
+  document.getElementById('form-card').style.display = 'block';
+}
+
+function hideForm() { document.getElementById('form-card').style.display = 'none'; }
+
+function collectForm() {
+  const shifts = [...document.querySelectorAll('#f-shifts tr')].map(tr => ({
+    name: tr.querySelector('[data-k=name]').value.trim() || '班次',
+    start: parseFloat(tr.querySelector('[data-k=start]').value),
+    end: parseFloat(tr.querySelector('[data-k=end]').value),
+  })).filter(s => !isNaN(s.start) && !isNaN(s.end));
+  const holidays = [...document.querySelectorAll('#f-holidays tr')].map(tr => [
+    tr.querySelector('[data-k="0"]').value, tr.querySelector('[data-k="1"]').value,
+  ]).filter(r => r[0] && r[1]);
+  return {
+    name: document.getElementById('f-name').value.trim(),
+    description: document.getElementById('f-desc').value.trim(),
+    origin_date: document.getElementById('f-origin').value,
+    slots_per_day: parseInt(document.getElementById('f-spd').value) || 24,
+    workdays: [...document.querySelectorAll('#f-workdays input:checked')].map(c => parseInt(c.dataset.wd)),
+    shifts, holidays,
+  };
+}
+
+async function saveForm() {
+  const body = collectForm();
+  if (!body.name) return toast('模板名称不能为空', 'error');
+  if (!body.shifts.length) return toast('至少需要一个班次窗口', 'error');
+  try {
+    if (editing) {
+      await api('/calendars/' + editing, { method: 'PUT', body: JSON.stringify(body) });
+      toast('模板已保存（版本 +1）。套用了它的资源需要「批量刷新」才会生效。');
+    } else {
+      await api('/calendars', { method: 'POST', body: JSON.stringify(body) });
+      toast('模板已创建');
+    }
+    hideForm();
+    await load();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function createFromPreset() {
+  const key = document.getElementById('preset-picker').value;
+  const p = presets.find(x => x.key === key);
+  if (!p) return;
+  const { key: _k, ...body } = p;
+  try {
+    await api('/calendars', { method: 'POST', body: JSON.stringify(body) });
+    toast('已从预设创建模板');
+    await load();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function removeTemplate(id) {
+  if (!confirm('删除模板不会改动已生成的可用时段，但相关套用将无法再刷新。确认删除？')) return;
+  await api('/calendars/' + id, { method: 'DELETE' });
+  toast('模板已删除');
+  await load();
+}
+
+/* ============================ 套用 ============================ */
+function renderApplyResources() {
+  document.getElementById('apply-resources').innerHTML = problem.resources.map(r =>
+    `<label style="font-weight:normal"><input type="checkbox" value="${escapeHtml(r.id)}"> ${escapeHtml(r.id)} ${escapeHtml(r.name)}</label>`).join('')
+    || '<span class="empty">当前问题没有资源。</span>';
+}
+
+function selectedResources() {
+  return [...document.querySelectorAll('#apply-resources input:checked')].map(c => c.value);
+}
+
+async function previewApply() {
+  const tid = document.getElementById('apply-template').value;
+  if (!tid || !problem) return toast('请选择模板和问题实例', 'error');
+  const q = new URLSearchParams({ horizon: problem.horizon });
+  const s = document.getElementById('apply-start').value;
+  const e = document.getElementById('apply-end').value;
+  if (s) q.set('start_date', s);
+  if (e) q.set('end_date', e);
+  const r = await api(`/calendars/${tid}/preview?` + q);
+  const head = r.intervals.slice(0, 12).map(iv => `[${iv[0]}, ${iv[1]})`).join('  ');
+  document.getElementById('apply-preview').textContent =
+    `将生成 ${r.count} 段可用时段（计划期 0–${r.horizon}）：${head}${r.count > 12 ? ' …' : ''}`;
+}
+
+async function applyTemplate() {
+  const tid = document.getElementById('apply-template').value;
+  const rids = selectedResources();
+  if (!tid) return toast('请先创建并选择模板', 'error');
+  if (!rids.length) return toast('请勾选至少一个资源', 'error');
+  try {
+    const r = await api(`/problems/${problem.id}/calendar/apply`, {
+      method: 'POST',
+      body: JSON.stringify({
+        template_id: tid, resource_ids: rids,
+        start_date: document.getElementById('apply-start').value || null,
+        end_date: document.getElementById('apply-end').value || null,
+      }),
+    });
+    toast(`已套用到 ${r.resources_updated.length} 个资源（问题 v${r.problem_version}）`);
+    problem = await api('/problems/' + problem.id);
+    await Promise.all([loadCalState(), loadStaleness()]);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function loadCalState() {
+  calState = await api(`/problems/${problem.id}/calendar`);
+  document.getElementById('assign-rows').innerHTML = calState.assignments.map(a => `
+    <tr>
+      <td>${escapeHtml(a.template_name)}<div class="small sub mono">${escapeHtml(a.template_id)}</div></td>
+      <td class="small mono">${escapeHtml((a.resource_ids || []).join(', '))}</td>
+      <td class="small">${escapeHtml(a.start_date || '原点')} → ${escapeHtml(a.end_date || '期末')}</td>
+      <td class="small">${escapeHtml(a.applied_at || '')}</td>
+      <td>${a.template_changed
+        ? `<span class="badge warn">模板已更新 v${a.template_version}→v${a.template_current_version}</span>`
+        : '<span class="badge ok">与模板一致</span>'}</td>
+      <td><button class="btn sm danger" onclick="unapply('${a.id}')">解除套用</button></td>
+    </tr>`).join('') || '<tr><td colspan="6" class="empty">尚未套用任何模板。</td></tr>';
+}
+
+async function unapply(aid) {
+  await api(`/problems/${problem.id}/calendar/assignments/${aid}`, { method: 'DELETE' });
+  toast('已解除套用（已生成的时段保留，可手工编辑）');
+  await loadCalState();
+}
+
+/* ============================ 刷新 & 时效 ============================ */
+async function refreshTemplate(tid) {
+  try {
+    const r = await api(`/calendars/${tid}/refresh`, { method: 'POST' });
+    if (!r.refreshed.length) return toast('没有问题实例套用该模板');
+    const lines = r.refreshed.map(s =>
+      `${s.problem_name || s.problem_id}：刷新 ${s.assignments_refreshed} 处套用，` +
+      `过期结果 ${s.stale_solutions + s.stale_sensitivity + s.stale_reports} 项`);
+    toast(lines.join('；'), 'ok');
+    if (problem) { await Promise.all([loadCalState(), loadStaleness()]); }
+    await load();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function loadStaleness() {
+  const st = await api(`/problems/${problem.id}/staleness`);
+  document.getElementById('staleness-summary').textContent =
+    `问题 v${st.problem_version} · 日历 v${st.calendar_version} · ` +
+    (st.n_stale ? `有 ${st.n_stale} 项结果已过期，请勿直接执行，需重新求解/分析。` : '所有结果均为最新。');
+  const groups = [
+    ['solutions', '求解方案', x => `${solverLabel(x.solver)} · 目标值 ${fmt(x.objective_value)}`],
+    ['sensitivity', '敏感性分析', x => `${x.parameter || ''} · ${solverLabel(x.solver)}`],
+    ['reports', '报告', x => x.title || ''],
+  ];
+  document.getElementById('staleness-body').innerHTML = groups.map(([key, label, descr]) => {
+    const items = st[key];
+    if (!items.length) return `<h3>${label}</h3><div class="empty">暂无记录。</div>`;
+    return `<h3>${label}</h3><table><thead><tr><th>ID</th><th>内容</th><th>生成时间</th><th>时效</th><th>原因</th></tr></thead><tbody>` +
+      items.map(x => `<tr>
+        <td class="mono small">${escapeHtml(x.id)}</td>
+        <td class="small">${escapeHtml(descr(x))}</td>
+        <td class="small">${escapeHtml(x.created_at || '')}</td>
+        <td>${staleBadge(x)}</td>
+        <td class="small">${escapeHtml((x.reasons || []).join('；')) || '—'}</td>
+      </tr>`).join('') + '</tbody></table>';
+  }).join('');
+}
+
+load().catch(e => toast(e.message, 'error'));
+</script>
+</body>
+</html>

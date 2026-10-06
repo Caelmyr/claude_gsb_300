@@ -70,6 +70,96 @@ def new_id(prefix: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Shift / calendar templates
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class CalendarTemplate:
+    """A reusable shift/calendar pattern used to generate resource
+    ``availability`` intervals instead of typing them in by hand.
+
+    Time model: slot 0 of a problem corresponds to ``origin_date`` 00:00 and
+    each day spans ``slots_per_day`` slots (24 for hourly problems).  A
+    template expands to concrete ``[start, end)`` slot intervals via
+    :func:`backend.calendar.generate_availability`:
+
+    * ``shifts``    -- windows within a day, e.g. {"name": "夜班", "start": 22,
+      "end": 30}; ``end`` may exceed ``slots_per_day`` for overnight shifts.
+    * ``workdays``  -- weekdays (0=Mon .. 6=Sun) the shifts run on.
+    * ``holidays``  -- inclusive ``[start_date, end_date]`` ranges
+      (YYYY-MM-DD) on which no shift runs.
+
+    ``version`` is bumped by the storage layer on every save; assignments
+    record the version they were generated from so a later template edit can
+    be detected and batch-refreshed.
+    """
+    id: str
+    name: str = ""
+    description: str = ""
+    origin_date: str = "2026-01-05"         # YYYY-MM-DD of slot 0 (a Monday)
+    slots_per_day: int = 24
+    shifts: List[Dict[str, Any]] = field(default_factory=list)
+    workdays: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])
+    holidays: List[List[str]] = field(default_factory=list)
+    version: int = 1
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+
+    def validate(self) -> List[str]:
+        errors: List[str] = []
+        if not self.name:
+            errors.append("模板名称不能为空")
+        if self.slots_per_day <= 0:
+            errors.append("每日时段数必须为正")
+        if not self.shifts:
+            errors.append("至少需要一个班次窗口")
+        for sh in self.shifts:
+            s, e = sh.get("start"), sh.get("end")
+            if s is None or e is None or not (0 <= s < e):
+                errors.append(f"班次 '{sh.get('name', '?')}' 需要满足 0 <= start < end")
+            elif e > 2 * self.slots_per_day:
+                errors.append(f"班次 '{sh.get('name', '?')}' 跨天幅度过大")
+        for wd in self.workdays:
+            if not (0 <= wd <= 6):
+                errors.append("工作日取值必须在 0(周一)..6(周日) 之间")
+        for rng in self.holidays:
+            if len(rng) != 2 or not all(isinstance(x, str) for x in rng):
+                errors.append("节假日区间必须是 [开始日期, 结束日期]")
+        return errors
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "CalendarTemplate":
+        known = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+@dataclass
+class CalendarAssignment:
+    """Records that ``template_id`` was applied to ``resource_ids`` of one
+    problem over an optional date range.  ``template_version`` is the template
+    version the availability was generated from; when the template is edited
+    (version bump) the assignment is stale until refreshed."""
+    id: str
+    template_id: str
+    resource_ids: List[str] = field(default_factory=list)
+    start_date: Optional[str] = None        # YYYY-MM-DD, None = from origin
+    end_date: Optional[str] = None          # YYYY-MM-DD, None = to horizon end
+    template_version: int = 1
+    applied_at: str = field(default_factory=now_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "CalendarAssignment":
+        known = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+# --------------------------------------------------------------------------- #
 # Resource
 # --------------------------------------------------------------------------- #
 
@@ -330,6 +420,11 @@ class Solution:
     lower_bound: Optional[float] = None
     created_at: str = field(default_factory=now_iso)
     version: int = 1
+    # Provenance stamps: the problem version and calendar state version the
+    # solution was computed against.  ``None`` means the result predates
+    # provenance tracking and cannot be trusted as current.
+    problem_version: Optional[int] = None
+    calendar_version: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -375,6 +470,8 @@ class SensitivityResult:
     parameter: str
     variations: List[Dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=now_iso)
+    problem_version: Optional[int] = None
+    calendar_version: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -392,6 +489,8 @@ class Report:
     format: str = "markdown"
     content: str = ""
     created_at: str = field(default_factory=now_iso)
+    problem_version: Optional[int] = None
+    calendar_version: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

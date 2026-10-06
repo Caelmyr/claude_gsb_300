@@ -45,6 +45,7 @@ from . import models
 
 DATA_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 INSTANCES_ROOT = os.path.join(DATA_ROOT, "instances")
+CALENDARS_ROOT = os.path.join(DATA_ROOT, "calendars")
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$")
 
@@ -62,6 +63,7 @@ def instance_dir(problem_id: str) -> str:
 
 def ensure_dirs() -> None:
     os.makedirs(INSTANCES_ROOT, exist_ok=True)
+    os.makedirs(CALENDARS_ROOT, exist_ok=True)
 
 
 def _subdirs(problem_id: str) -> List[str]:
@@ -413,3 +415,105 @@ def load_report(problem_id: str, report_id: str) -> Optional[models.Report]:
     if not os.path.isfile(path):
         return None
     return models.Report.from_dict(_read_json(path))
+
+
+# --------------------------------------------------------------------------- #
+# Calendar / shift templates (global, shared across problems)
+# --------------------------------------------------------------------------- #
+
+def _calendar_lock() -> "contextmanager":
+    ensure_dirs()
+    return file_lock(os.path.join(CALENDARS_ROOT, ".lock"))
+
+
+def calendar_template_path(template_id: str) -> str:
+    if not is_safe_id(template_id):
+        raise ValueError(f"invalid template id: {template_id!r}")
+    return os.path.join(CALENDARS_ROOT, f"{template_id}.json")
+
+
+def save_calendar_template(template: models.CalendarTemplate) -> models.CalendarTemplate:
+    """Persist a template, bumping ``version`` on every update.  The version
+    is what assignments and the refresh logic key on to detect edits."""
+    ensure_dirs()
+    with _calendar_lock():
+        path = calendar_template_path(template.id)
+        if os.path.isfile(path):
+            try:
+                prev = _read_json(path)
+                template.version = int(prev.get("version", 1)) + 1
+                template.created_at = prev.get("created_at") or template.created_at
+            except (OSError, json.JSONDecodeError):
+                template.version += 1
+        template.updated_at = models.now_iso()
+        atomic_write_json(path, template.to_dict())
+    return template
+
+
+def load_calendar_template(template_id: str) -> Optional[models.CalendarTemplate]:
+    if not is_safe_id(template_id):
+        return None
+    path = calendar_template_path(template_id)
+    if not os.path.isfile(path):
+        return None
+    try:
+        return models.CalendarTemplate.from_dict(_read_json(path))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def list_calendar_templates() -> List[Dict[str, Any]]:
+    ensure_dirs()
+    out = []
+    for name in sorted(os.listdir(CALENDARS_ROOT)):
+        if not name.endswith(".json"):
+            continue
+        try:
+            out.append(_read_json(os.path.join(CALENDARS_ROOT, name)))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return out
+
+
+def delete_calendar_template(template_id: str) -> bool:
+    if not is_safe_id(template_id):
+        return False
+    path = calendar_template_path(template_id)
+    if not os.path.isfile(path):
+        return False
+    with _calendar_lock():
+        os.remove(path)
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Per-problem calendar state (assignments + calendar_version counter)
+# --------------------------------------------------------------------------- #
+
+def calendar_state_path(problem_id: str) -> str:
+    return os.path.join(instance_dir(problem_id), "calendar_state.json")
+
+
+def load_calendar_state(problem_id: str) -> Dict[str, Any]:
+    """Return ``{"version": int, "assignments": [...]}``; defaults to an empty
+    state when the problem has never used calendar templates."""
+    path = calendar_state_path(problem_id)
+    if not os.path.isfile(path):
+        return {"version": 0, "assignments": []}
+    try:
+        d = _read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return {"version": 0, "assignments": []}
+    d.setdefault("version", 0)
+    d.setdefault("assignments", [])
+    return d
+
+
+def save_calendar_state(problem_id: str, state: Dict[str, Any]) -> None:
+    ensure_instance_dirs(problem_id)
+    with problem_lock(problem_id):
+        atomic_write_json(calendar_state_path(problem_id), state)
+
+
+def calendar_version(problem_id: str) -> int:
+    return int(load_calendar_state(problem_id).get("version", 0))

@@ -7,6 +7,10 @@ Examples::
     python cli.py solve demo_jobshop --solver genetic --params generations=300
     python cli.py sensitivity demo_jobshop --kind resource_capacity --resource M1
     python cli.py report demo_jobshop
+    python cli.py calendar-presets
+    python cli.py calendar-apply demo_jobshop <template_id> M1 M2
+    python cli.py calendar-refresh <template_id>
+    python cli.py staleness demo_jobshop
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ import json
 import sys
 from typing import Any, Dict, List
 
+from backend import calendar as cal
 from backend import models, report, seed, sensitivity, storage
 from backend.solvers import base as solver_base
 
@@ -69,6 +74,8 @@ def cmd_solve(args) -> None:
     params.update(_parse_params(args.params))
     solver = solver_base.get_solver(args.solver)
     sol = solver.solve(p, params)
+    sol.problem_version = p.version
+    sol.calendar_version = storage.calendar_version(args.id)
     storage.save_solution(args.id, sol)
     print(f"solution {sol.id}: solver={sol.solver} status={sol.status} "
           f"objective={sol.objective_value} makespan={sol.makespan} "
@@ -94,6 +101,9 @@ def cmd_sensitivity(args) -> None:
     if args.task:
         spec["task"] = args.task
     result = sensitivity.run_sensitivity(p, args.solver, spec, persist=True)
+    result.problem_version = p.version
+    result.calendar_version = storage.calendar_version(args.id)
+    storage.save_sensitivity(args.id, result)
     print(f"sensitivity {result.id} (base obj {result.base_objective}):")
     for v in result.variations:
         print(f"  {v['label']:24s} obj={v['objective_value']} "
@@ -108,7 +118,83 @@ def cmd_report(args) -> None:
     sols = [storage.load_solution(args.id, sid) for sid in args.solutions]
     sols = [s for s in sols if s is not None]
     rep = report.generate_report(p, sols)
+    rep.problem_version = p.version
+    rep.calendar_version = storage.calendar_version(args.id)
+    storage.save_report(args.id, rep)
     print(rep.content)
+
+
+def cmd_calendar_presets(args) -> None:
+    for p in cal.preset_templates():
+        print(f"{p['key']:14s} {p['name']}  -- {p['description']}")
+
+
+def cmd_calendar_new(args) -> None:
+    """Create a template from a built-in preset key."""
+    preset = next((p for p in cal.preset_templates() if p["key"] == args.preset), None)
+    if preset is None:
+        print(f"unknown preset: {args.preset}")
+        sys.exit(1)
+    data = {k: v for k, v in preset.items() if k != "key"}
+    data["id"] = args.id or models.new_id("cal_t")
+    template = models.CalendarTemplate.from_dict(data)
+    errors = template.validate()
+    if errors:
+        print("invalid template:", "; ".join(errors))
+        sys.exit(1)
+    storage.save_calendar_template(template)
+    print(f"created template {template.id} ({template.name})")
+
+
+def cmd_calendar_list(args) -> None:
+    for t in storage.list_calendar_templates():
+        print(f"{t['id']:16s} v{t.get('version', 1):<3d} {t.get('name', '')}  "
+              f"shifts={len(t.get('shifts', []))} holidays={len(t.get('holidays', []))}")
+
+
+def cmd_calendar_apply(args) -> None:
+    p = storage.load_problem(args.id)
+    if p is None:
+        print(f"no such problem: {args.id}")
+        sys.exit(1)
+    template = storage.load_calendar_template(args.template)
+    if template is None:
+        print(f"no such template: {args.template}")
+        sys.exit(1)
+    assignment, updated = cal.apply_template(
+        p, template, args.resources,
+        start_date=args.start_date, end_date=args.end_date)
+    print(f"applied template {template.id} v{template.version} to "
+          f"{len(updated)} resource(s): {', '.join(updated)}")
+    print(f"assignment {assignment.id}; problem now v{p.version}, "
+          f"calendar v{storage.calendar_version(p.id)}")
+
+
+def cmd_calendar_refresh(args) -> None:
+    summary = cal.refresh_template(args.template)
+    if not summary:
+        print("no assignments reference this template")
+        return
+    for s in summary:
+        print(f"{s['problem_id']:16s} assignments={s['assignments_refreshed']} "
+              f"resources={len(s['resources'])} calendar_v={s['calendar_version']} "
+              f"stale: solutions={s['stale_solutions']} "
+              f"sensitivity={s['stale_sensitivity']} reports={s['stale_reports']}")
+
+
+def cmd_staleness(args) -> None:
+    p = storage.load_problem(args.id)
+    if p is None:
+        print(f"no such problem: {args.id}")
+        sys.exit(1)
+    st = cal.staleness(p)
+    print(f"problem v{st['problem_version']}, calendar v{st['calendar_version']}, "
+          f"stale artefacts: {st['n_stale']}")
+    for group in ("solutions", "sensitivity", "reports"):
+        for item in st[group]:
+            mark = "STALE" if item["stale"] else "ok   "
+            print(f"  [{mark}] {group[:-1]} {item['id']}"
+                  + (f"  -- {'; '.join(item['reasons'])}" if item["stale"] else ""))
 
 
 def main() -> None:
@@ -150,6 +236,33 @@ def main() -> None:
     p_rep.add_argument("id")
     p_rep.add_argument("--solutions", nargs="*", default=[])
     p_rep.set_defaults(func=cmd_report)
+
+    p_cp = sub.add_parser("calendar-presets")
+    p_cp.set_defaults(func=cmd_calendar_presets)
+
+    p_cn = sub.add_parser("calendar-new")
+    p_cn.add_argument("preset", help="preset key (see calendar-presets)")
+    p_cn.add_argument("--id")
+    p_cn.set_defaults(func=cmd_calendar_new)
+
+    p_cl = sub.add_parser("calendar-list")
+    p_cl.set_defaults(func=cmd_calendar_list)
+
+    p_ca = sub.add_parser("calendar-apply")
+    p_ca.add_argument("id")
+    p_ca.add_argument("template")
+    p_ca.add_argument("resources", nargs="+")
+    p_ca.add_argument("--start-date")
+    p_ca.add_argument("--end-date")
+    p_ca.set_defaults(func=cmd_calendar_apply)
+
+    p_cr = sub.add_parser("calendar-refresh")
+    p_cr.add_argument("template")
+    p_cr.set_defaults(func=cmd_calendar_refresh)
+
+    p_st = sub.add_parser("staleness")
+    p_st.add_argument("id")
+    p_st.set_defaults(func=cmd_staleness)
 
     args = parser.parse_args()
     args.func(args)

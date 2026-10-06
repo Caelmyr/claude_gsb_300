@@ -125,6 +125,7 @@ function toast(msg, type = 'ok') {
 const NAV = [
   ['index.html', '仪表盘'],
   ['resources.html', '资源管理'],
+  ['calendars.html', '班次日历'],
   ['tasks.html', '任务与依赖'],
   ['constraints.html', '约束配置'],
   ['solvers.html', '求解器与参数'],
@@ -187,6 +188,31 @@ function statusBadge(status) {
   const cls = { optimal: 'ok', feasible: 'info', infeasible: 'bad',
     timeout: 'warn', error: 'bad' }[status] || 'muted';
   return `<span class="badge ${cls}">${escapeHtml(statusLabel(status))}</span>`;
+}
+
+/* ---- staleness (shift/calendar provenance) ---------------------------- */
+/* Fetch per-artefact staleness for a problem: solutions / sensitivity /
+   reports each carry {id, stale, reasons}. */
+async function fetchStaleness(problemId) {
+  return api(`/problems/${problemId}/staleness`);
+}
+
+/* Badge marking a derived result as outdated (e.g. shifts changed since it
+   was computed).  Reasons are shown on hover. */
+function staleBadge(item) {
+  if (!item) return '<span class="badge muted">未知</span>';
+  if (!item.stale) return '<span class="badge ok">最新</span>';
+  const tip = escapeHtml((item.reasons || []).join('；'));
+  return `<span class="badge warn" title="${tip}">已过期 ⚠</span>`;
+}
+
+/* Index a staleness response by artefact id for quick lookup. */
+function stalenessIndex(st) {
+  const map = {};
+  for (const group of ['solutions', 'sensitivity', 'reports']) {
+    for (const item of (st && st[group]) || []) map[item.id] = item;
+  }
+  return map;
 }
 
 /* ---- DOM helpers ----------------------------------------------------- */

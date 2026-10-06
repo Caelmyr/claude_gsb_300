@@ -49,7 +49,7 @@
 
     <div class="card">
       <h2>已保存的分析</h2>
-      <table><thead><tr><th>ID</th><th>参数</th><th>求解器</th><th class="num">基准目标值</th><th>时间</th></tr></thead>
+      <table><thead><tr><th>ID</th><th>参数</th><th>求解器</th><th class="num">基准目标值</th><th>时效</th><th>时间</th></tr></thead>
         <tbody id="saved-rows"></tbody></table>
     </div>
   </main>
@@ -125,11 +125,14 @@ function showResult(r) {
 
 async function loadSaved() {
   const { results } = await api(`/problems/${problem.id}/sensitivity`).catch(() => ({ results: [] }));
+  const st = await fetchStaleness(problem.id).catch(() => null);
+  const staleMap = st ? stalenessIndex(st) : {};
   document.getElementById('saved-rows').innerHTML = results.map(r => `
     <tr><td class="mono">${escapeHtml(r.id)}</td><td>${escapeHtml(r.parameter)}</td>
       <td>${escapeHtml(SOLVER_LABELS[r.solver] || r.solver)}</td><td class="num">${fmt(r.base_objective)}</td>
+      <td>${staleBadge(staleMap[r.id])}</td>
       <td class="small muted">${escapeHtml(r.created_at)}</td></tr>`).join('')
-    || '<tr><td colspan="5" class="empty">暂无分析。</td></tr>';
+    || '<tr><td colspan="6" class="empty">暂无分析。</td></tr>';
 }
 
 document.getElementById('kind').addEventListener('change', renderTargets);

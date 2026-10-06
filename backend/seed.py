@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import List
 
+from . import calendar as cal
 from . import models, storage
 
 
@@ -144,6 +145,21 @@ def seed_all(force: bool = False) -> List[str]:
             continue
         storage.save_problem(problem)
         created.append(problem.id)
+    seed_calendar_templates(force=force)
+    return created
+
+
+def seed_calendar_templates(force: bool = False) -> List[str]:
+    """Create the built-in shift/calendar presets as templates on first run."""
+    created: List[str] = []
+    for preset in cal.preset_templates():
+        data = {k: v for k, v in preset.items() if k != "key"}
+        data["id"] = f"tpl_{preset['key']}"
+        if not force and storage.load_calendar_template(data["id"]) is not None:
+            continue
+        template = models.CalendarTemplate.from_dict(data)
+        storage.save_calendar_template(template)
+        created.append(template.id)
     return created
 
 

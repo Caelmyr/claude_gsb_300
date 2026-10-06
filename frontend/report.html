@@ -42,7 +42,7 @@
 
     <div class="card">
       <h2>已保存的报告</h2>
-      <table><thead><tr><th>ID</th><th>标题</th><th>创建时间</th><th></th></tr></thead>
+      <table><thead><tr><th>ID</th><th>标题</th><th>时效</th><th>创建时间</th><th></th></tr></thead>
         <tbody id="saved-rows"></tbody></table>
     </div>
   </main>
@@ -96,11 +96,14 @@ function copyMarkdown() {
 
 async function loadSaved() {
   const { reports } = await api(`/problems/${problem.id}/reports`).catch(() => ({ reports: [] }));
+  const st = await fetchStaleness(problem.id).catch(() => null);
+  const staleMap = st ? stalenessIndex(st) : {};
   document.getElementById('saved-rows').innerHTML = reports.map(r => `
     <tr><td class="mono">${escapeHtml(r.id)}</td><td>${escapeHtml(r.title)}</td>
+      <td>${staleBadge(staleMap[r.id])}</td>
       <td class="small muted">${escapeHtml(r.created_at)}</td>
       <td><button class="btn sm" onclick='viewReport(${JSON.stringify(r.content).replace(/'/g, "&#39;")})'>查看</button></td></tr>`).join('')
-    || '<tr><td colspan="4" class="empty">暂无报告。</td></tr>';
+    || '<tr><td colspan="5" class="empty">暂无报告。</td></tr>';
 }
 
 function viewReport(content) {
