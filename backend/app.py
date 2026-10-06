@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import models, report, sensitivity, storage
+from . import calendar, models, report, sensitivity, storage
+from . import freshness
 from .solvers import base as solver_base
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -23,6 +24,28 @@ FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 def create_app() -> Flask:
     app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="/static")
     storage.ensure_dirs()
+
+    def _mark_manual_availability(problem_id: str, problem) -> None:
+        """Tag resources whose availability list was edited outside the
+        calendar engine, so the refresh flow can warn before overwriting."""
+        old = storage.load_problem(problem_id)
+        old_map = old.resource_map() if old else {}
+        for r in problem.resources:
+            prev = old_map.get(r.id)
+            if prev is None:
+                # brand-new resource: intervals authored by hand
+                if r.availability is not None and (r.availability_meta or {}).get("source") != "calendar":
+                    r.availability_meta = {"source": "manual",
+                                           "generated_at": models.now_iso()}
+                continue
+            if (r.availability_meta or {}).get("source") == "calendar":
+                continue
+            if r.availability != prev.availability:
+                r.availability_meta = {
+                    "source": "manual",
+                    "note": "hand-edited; a calendar refresh will overwrite",
+                    "generated_at": models.now_iso(),
+                }
 
     # ------------------------------------------------------------------ #
     # Static pages
@@ -92,6 +115,7 @@ def create_app() -> Flask:
         try:
             problem = models.Problem.from_dict(data)
             problem.id = problem_id
+            _mark_manual_availability(problem_id, problem)
             errors = models.validate_problem(problem)
             if errors:
                 return jsonify({"error": "validation failed", "details": errors}), 400
@@ -139,14 +163,25 @@ def create_app() -> Flask:
 
     @app.route("/api/problems/<problem_id>/solutions", methods=["GET"])
     def solutions(problem_id: str):
-        return jsonify({"solutions": storage.list_solutions(problem_id)})
+        problem = storage.load_problem(problem_id)
+        if problem is None:
+            return jsonify({"error": "not found"}), 404
+        rows = [freshness.evaluate_solution(
+            problem, storage.load_solution(problem_id, row["id"]))
+            for row in storage.list_solutions(problem_id)
+            if storage.load_solution(problem_id, row["id"]) is not None]
+        return jsonify({"solutions": rows})
 
     @app.route("/api/problems/<problem_id>/solutions/<solution_id>", methods=["GET"])
     def solution(problem_id: str, solution_id: str):
         sol = storage.load_solution(problem_id, solution_id)
         if sol is None:
             return jsonify({"error": "not found"}), 404
-        return jsonify(sol.to_dict())
+        problem = storage.load_problem(problem_id)
+        data = sol.to_dict()
+        if problem is not None:
+            data["freshness"] = freshness.evaluate_solution(problem, sol)
+        return jsonify(data)
 
     @app.route("/api/problems/<problem_id>/solutions/<solution_id>", methods=["DELETE"])
     def delete_solution(problem_id: str, solution_id: str):
@@ -179,7 +214,13 @@ def create_app() -> Flask:
 
     @app.route("/api/problems/<problem_id>/sensitivity", methods=["GET"])
     def sensitivity_list(problem_id: str):
-        return jsonify({"results": storage.list_sensitivity(problem_id)})
+        problem = storage.load_problem(problem_id)
+        if problem is None:
+            return jsonify({"error": "not found"}), 404
+        results = [freshness.evaluate_sensitivity(
+            problem, models.SensitivityResult.from_dict(item))
+            for item in storage.list_sensitivity(problem_id)]
+        return jsonify({"results": results})
 
     @app.route("/api/problems/<problem_id>/compare", methods=["POST"])
     def compare(problem_id: str):
@@ -218,19 +259,161 @@ def create_app() -> Flask:
                     sens = models.SensitivityResult.from_dict(item)
         rep = report.generate_report(problem, sols, sens,
                                      title=data.get("title"),
-                                     persist=True)
+                                     persist=True,
+                                     solution_ids=data.get("solution_ids"))
         return jsonify(rep.to_dict()), 201
 
     @app.route("/api/problems/<problem_id>/reports", methods=["GET"])
     def reports(problem_id: str):
-        return jsonify({"reports": storage.list_reports(problem_id)})
+        problem = storage.load_problem(problem_id)
+        if problem is None:
+            return jsonify({"error": "not found"}), 404
+        summary = freshness.freshness_summary(problem)
+        sol_states = {s["id"]: s for s in summary["solutions"]}
+        sens_states = {s["id"]: s for s in summary["sensitivity"]}
+        rows = [freshness.evaluate_report(
+            problem, models.Report.from_dict(item), sol_states, sens_states)
+            for item in storage.list_reports(problem_id)]
+        return jsonify({"reports": rows})
 
     @app.route("/api/problems/<problem_id>/reports/<report_id>", methods=["GET"])
     def get_report(problem_id: str, report_id: str):
         rep = storage.load_report(problem_id, report_id)
         if rep is None:
             return jsonify({"error": "not found"}), 404
-        return jsonify(rep.to_dict())
+        problem = storage.load_problem(problem_id)
+        data = rep.to_dict()
+        if problem is not None:
+            summary = freshness.freshness_summary(problem)
+            sol_states = {s["id"]: s for s in summary["solutions"]}
+            sens_states = {s["id"]: s for s in summary["sensitivity"]}
+            data["freshness"] = freshness.evaluate_report(
+                problem, rep, sol_states, sens_states)
+        return jsonify(data)
+
+    # ------------------------------------------------------------------ #
+    # Calendar / shift templates
+    # ------------------------------------------------------------------ #
+    def _calendar_payload(problem) -> Dict[str, Any]:
+        """Resource rows augmented with binding/availability provenance."""
+        resources = []
+        for r in problem.resources:
+            bindings = [b.to_dict() for b in problem.bindings_for(r.id)]
+            resources.append({
+                **r.to_dict(),
+                "bindings": bindings,
+            })
+        return {
+            "start_date": problem.start_date,
+            "slots_per_day": problem.slots_per_day,
+            "horizon": problem.horizon,
+            "weekdays": [{"index": i, "name": models.WEEKDAY_NAMES[i],
+                          "label": models.WEEKDAY_LABELS[i]} for i in range(7)],
+            "shifts": [s.to_dict() for s in problem.shifts],
+            "calendars": [c.to_dict() for c in problem.calendars],
+            "bindings": [b.to_dict() for b in problem.bindings],
+            "resources": resources,
+        }
+
+    @app.route("/api/problems/<problem_id>/calendar", methods=["GET"])
+    def calendar_get(problem_id: str):
+        problem = storage.load_problem(problem_id)
+        if problem is None:
+            return jsonify({"error": "not found"}), 404
+        return jsonify(_calendar_payload(problem))
+
+    @app.route("/api/problems/<problem_id>/calendar", methods=["PUT"])
+    def calendar_save(problem_id: str):
+        """Save shifts / calendars / bindings (and optional date anchor).
+
+        Template edits alone never touch generated availability; the response
+        lists resources whose stored intervals are now out of sync so the UI
+        can offer a refresh."""
+        problem = storage.load_problem(problem_id)
+        if problem is None:
+            return jsonify({"error": "not found"}), 404
+        data = request.get_json(force=True) or {}
+        try:
+            if "start_date" in data:
+                problem.start_date = data["start_date"]
+            if "slots_per_day" in data:
+                problem.slots_per_day = int(data["slots_per_day"])
+            if "shifts" in data:
+                problem.shifts = [models.ShiftTemplate.from_dict(s)
+                                  for s in data["shifts"]]
+            if "calendars" in data:
+                problem.calendars = [models.CalendarTemplate.from_dict(c)
+                                     for c in data["calendars"]]
+            if "bindings" in data:
+                problem.bindings = [models.CalendarBinding.from_dict(b)
+                                    for b in data["bindings"]]
+            errors = models.validate_problem(problem)
+            if errors:
+                return jsonify({"error": "validation failed", "details": errors}), 400
+            storage.save_problem(problem)
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        preview = calendar.preview_refresh(problem)
+        pending = [row for row in preview if row["changed"]]
+        return jsonify({
+            **_calendar_payload(problem),
+            "problem_version": problem.version,
+            "pending_refresh": pending,
+        })
+
+    @app.route("/api/problems/<problem_id>/calendar/preview", methods=["POST"])
+    def calendar_preview(problem_id: str):
+        """Dry-run expansion. Accepts optional full calendar payload (so the UI
+        can preview unsaved edits), otherwise expands the saved problem."""
+        problem = storage.load_problem(problem_id)
+        if problem is None:
+            return jsonify({"error": "not found"}), 404
+        data = request.get_json(silent=True) or {}
+        if any(k in data for k in ("shifts", "calendars", "bindings")):
+            problem = models.Problem.from_dict(problem.to_dict())
+            if "shifts" in data:
+                problem.shifts = [models.ShiftTemplate.from_dict(s)
+                                  for s in data["shifts"]]
+            if "calendars" in data:
+                problem.calendars = [models.CalendarTemplate.from_dict(c)
+                                     for c in data["calendars"]]
+            if "bindings" in data:
+                problem.bindings = [models.CalendarBinding.from_dict(b)
+                                    for b in data["bindings"]]
+            if "start_date" in data:
+                problem.start_date = data["start_date"]
+            if "slots_per_day" in data:
+                problem.slots_per_day = int(data["slots_per_day"])
+            errors = models.validate_problem(problem)
+            if errors:
+                return jsonify({"error": "validation failed", "details": errors}), 400
+        ids = data.get("resource_ids")
+        rows = calendar.preview_refresh(problem, ids)
+        return jsonify({"rows": rows})
+
+    @app.route("/api/problems/<problem_id>/calendar/refresh", methods=["POST"])
+    def calendar_refresh(problem_id: str):
+        """Batch-regenerate availability from templates and persist a new
+        problem version. The response includes the post-refresh freshness
+        summary so the caller can immediately see which results went stale."""
+        problem = storage.load_problem(problem_id)
+        if problem is None:
+            return jsonify({"error": "not found"}), 404
+        data = request.get_json(silent=True) or {}
+        ids = data.get("resource_ids")
+        result = calendar.refresh_all(problem, ids)
+        storage.save_problem(problem)
+        result["problem_version"] = problem.version
+        result["freshness"] = freshness.freshness_summary(problem)
+        return jsonify(result)
+
+    @app.route("/api/problems/<problem_id>/freshness", methods=["GET"])
+    def freshness_get(problem_id: str):
+        problem = storage.load_problem(problem_id)
+        if problem is None:
+            return jsonify({"error": "not found"}), 404
+        return jsonify(freshness.freshness_summary(problem))
 
     # ------------------------------------------------------------------ #
     # Configs

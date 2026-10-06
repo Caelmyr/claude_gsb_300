@@ -41,7 +41,7 @@ class Solver(ABC):
             if not message:
                 message = "; ".join(violations[:3])
 
-        return models.Solution(
+        sol = models.Solution(
             id=models.new_id("sol"),
             problem_id=problem.id,
             solver=self.name,
@@ -55,6 +55,22 @@ class Solver(ABC):
             message=message,
             lower_bound=lower_bound,
         )
+        from .. import freshness
+        freshness.stamp_solution(problem, sol)
+        return sol
+
+    def make_error_solution(self, problem: models.Problem, message: str,
+                            status: str = "error", solve_time: float = 0.0,
+                            params: Dict[str, Any] | None = None,
+                            lower_bound: float | None = None) -> models.Solution:
+        """Build a provenance-stamped non-schedule result (error/infeasible)."""
+        from .. import freshness
+        sol = models.Solution(
+            id=models.new_id("sol"), problem_id=problem.id, solver=self.name,
+            status=status, message=message, params=params or {},
+            solve_time=round(solve_time, 4), lower_bound=lower_bound)
+        freshness.stamp_solution(problem, sol)
+        return sol
 
     def run_timed(self, problem: models.Problem, params: Dict[str, Any],
                   fn) -> models.Solution:

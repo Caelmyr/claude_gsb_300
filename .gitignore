@@ -20,3 +20,10 @@ coverage/
 !.env.example
 .DS_Store
 Thumbs.db
+
+# 运行期生成的求解/分析/报告与版本快照（可由 seed/求解重建）
+data/instances/*/versions/
+data/instances/*/solutions/
+data/instances/*/sensitivity/
+data/instances/*/reports/
+data/instances/*/configs/

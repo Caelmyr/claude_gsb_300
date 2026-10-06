@@ -37,8 +37,10 @@
       <div class="flex">
         <h2 style="margin:0" id="chart-title">甘特图</h2>
         <div class="spacer"></div>
+        <span id="sol-fresh"></span>
         <span class="badge info" id="sol-meta"></span>
       </div>
+      <div id="stale-note"></div>
       <div id="gantt-container"></div>
       <div class="legend" id="legend"></div>
     </div>
@@ -69,9 +71,11 @@ async function load() {
 
 async function loadSolutions(preferred) {
   const { solutions } = await api(`/problems/${problem.id}/solutions`);
+  window._solutionMeta = Object.fromEntries(solutions.map(s => [s.id, s]));
   const sel = document.getElementById('solution-picker');
   sel.innerHTML = solutions.length
-    ? solutions.map(s => `<option value="${s.id}" ${s.id === preferred ? 'selected' : ''}>${escapeHtml(SOLVER_LABELS[s.solver] || s.solver)} · 目标 ${fmt(s.objective_value)} · ${escapeHtml(s.created_at)}</option>`).join('')
+    ? solutions.map(s => `<option value="${s.id}" ${s.id === preferred ? 'selected' : ''}>${
+        freshnessInfo(s).stale ? '⚠️ ' : ''}${escapeHtml(SOLVER_LABELS[s.solver] || s.solver)} · 目标 ${fmt(s.objective_value)} · ${escapeHtml(s.created_at)}</option>`).join('')
     : '<option value="">— 暂无求解结果 —</option>';
   if (solutions.length) {
     const id = preferred || solutions[solutions.length - 1].id;
@@ -94,6 +98,11 @@ function render() {
     `甘特图 — ${SOLVER_LABELS[solution.solver] || solution.solver}（${mode === 'task' ? '按任务' : '按资源'}）`;
   document.getElementById('sol-meta').textContent =
     `目标 ${fmt(solution.objective_value)} · 完工时间 ${fmt(solution.makespan)} · ${statusLabel(solution.status)}`;
+  const info = freshnessInfo(solution);
+  document.getElementById('sol-fresh').innerHTML = freshnessBadge(solution);
+  document.getElementById('stale-note').innerHTML = info.stale
+    ? `<div class="stale-banner" style="margin:10px 0 0">⚠️ 该排程基于旧班次生成，<b>请勿据此执行</b>：${
+        info.reasons.map(escapeHtml).join('；')}。请重新求解。</div>` : '';
   renderGantt(document.getElementById('gantt-container'), {
     problem, assignments: solution.assignments, mode,
     title: `排程 — ${SOLVER_LABELS[solution.solver] || solution.solver}`,

@@ -49,7 +49,8 @@
 
     <div class="card">
       <h2>已保存的分析</h2>
-      <table><thead><tr><th>ID</th><th>参数</th><th>求解器</th><th class="num">基准目标值</th><th>时间</th></tr></thead>
+      <table><thead><tr><th>有效性</th><th>ID</th><th>参数</th><th>求解器</th>
+        <th class="num">基准目标值</th><th>时间</th></tr></thead>
         <tbody id="saved-rows"></tbody></table>
     </div>
   </main>
@@ -125,11 +126,16 @@ function showResult(r) {
 
 async function loadSaved() {
   const { results } = await api(`/problems/${problem.id}/sensitivity`).catch(() => ({ results: [] }));
-  document.getElementById('saved-rows').innerHTML = results.map(r => `
-    <tr><td class="mono">${escapeHtml(r.id)}</td><td>${escapeHtml(r.parameter)}</td>
+  document.getElementById('saved-rows').innerHTML = results.map(r => {
+    const info = freshnessInfo(r);
+    return `<tr style="${info.stale ? 'background:#fef2f2' : ''}">
+      <td>${freshnessBadge(r)}</td>
+      <td class="mono">${escapeHtml(r.id)}</td><td>${escapeHtml(r.parameter)}</td>
       <td>${escapeHtml(SOLVER_LABELS[r.solver] || r.solver)}</td><td class="num">${fmt(r.base_objective)}</td>
-      <td class="small muted">${escapeHtml(r.created_at)}</td></tr>`).join('')
-    || '<tr><td colspan="5" class="empty">暂无分析。</td></tr>';
+      <td class="small muted">${escapeHtml(r.created_at)}</td></tr>
+      ${info.stale ? `<tr style="background:#fef2f2"><td colspan="6" class="small" style="color:#991b1b">
+        班次/输入已变化，该分析的扰动结论不再对应当前模型，建议重跑：${info.reasons.map(escapeHtml).join('；')}</td></tr>` : ''}`;
+  }).join('') || '<tr><td colspan="6" class="empty">暂无分析。</td></tr>';
 }
 
 document.getElementById('kind').addEventListener('change', renderTargets);

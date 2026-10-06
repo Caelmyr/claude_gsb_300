@@ -1,24 +1,43 @@
 {
   "id": "demo_staffing",
   "name": "班次排班示例",
-  "description": "带技能的人员、硬时间窗口与软截止/偏好惩罚；目标为加权完工时间。",
-  "horizon": 60,
+  "description": "白班/中班/夜班三班倒，含周末双休、节假日与周日设备保养；目标为加权完工时间。",
+  "horizon": 216,
   "time_unit": "小时",
+  "start_date": "2024-01-01",
+  "slots_per_day": 24,
   "resources": [
     {
       "id": "P1",
-      "name": "护士甲",
+      "name": "护士甲（三班倒）",
       "type": "personnel",
       "capacity": 1,
       "skills": [
         "护理"
       ],
       "cost_per_unit": 12.0,
-      "availability": null
+      "availability": [
+        [
+          0,
+          216
+        ]
+      ],
+      "availability_meta": {
+        "source": "calendar",
+        "binding_ids": [
+          "b_p1"
+        ],
+        "calendar_ids": [
+          "cal_rotating"
+        ],
+        "signature": "aad6ba7dcf703c2b",
+        "n_intervals": 1,
+        "generated_at": "2026-10-06T14:13:43"
+      }
     },
     {
       "id": "P2",
-      "name": "护士乙",
+      "name": "护士乙（三班倒）",
       "type": "personnel",
       "capacity": 1,
       "skills": [
@@ -26,18 +45,52 @@
         "转运"
       ],
       "cost_per_unit": 10.0,
-      "availability": null
+      "availability": [
+        [
+          0,
+          216
+        ]
+      ],
+      "availability_meta": {
+        "source": "calendar",
+        "binding_ids": [
+          "b_p2"
+        ],
+        "calendar_ids": [
+          "cal_rotating"
+        ],
+        "signature": "0e26c86ba9ec3996",
+        "n_intervals": 1,
+        "generated_at": "2026-10-06T14:13:43"
+      }
     },
     {
       "id": "P3",
-      "name": "护士丙",
+      "name": "护士丙（三班倒）",
       "type": "personnel",
       "capacity": 1,
       "skills": [
         "护理"
       ],
       "cost_per_unit": 11.0,
-      "availability": null
+      "availability": [
+        [
+          0,
+          216
+        ]
+      ],
+      "availability_meta": {
+        "source": "calendar",
+        "binding_ids": [
+          "b_p3"
+        ],
+        "calendar_ids": [
+          "cal_rotating"
+        ],
+        "signature": "b82782761a8c3be6",
+        "n_intervals": 1,
+        "generated_at": "2026-10-06T14:13:43"
+      }
     },
     {
       "id": "R1",
@@ -46,11 +99,58 @@
       "capacity": 2,
       "skills": [],
       "cost_per_unit": 2.0,
-      "availability": null
+      "availability": [
+        [
+          24,
+          216
+        ]
+      ],
+      "availability_meta": {
+        "source": "calendar",
+        "binding_ids": [
+          "b_r1"
+        ],
+        "calendar_ids": [
+          "cal_room"
+        ],
+        "signature": "430e7d04fca15c96",
+        "n_intervals": 1,
+        "generated_at": "2026-10-06T14:13:43"
+      }
+    },
+    {
+      "id": "E1",
+      "name": "超声设备（周日保养）",
+      "type": "equipment",
+      "capacity": 1,
+      "skills": [],
+      "cost_per_unit": 4.0,
+      "availability": [
+        [
+          24,
+          144
+        ],
+        [
+          168,
+          216
+        ]
+      ],
+      "availability_meta": {
+        "source": "calendar",
+        "binding_ids": [
+          "b_e1"
+        ],
+        "calendar_ids": [
+          "cal_machine"
+        ],
+        "signature": "cd9b40070ac393c9",
+        "n_intervals": 2,
+        "generated_at": "2026-10-06T14:13:43"
+      }
     },
     {
       "id": "T1",
-      "name": "日班",
+      "name": "班次时段",
       "type": "time",
       "capacity": 3,
       "skills": [],
@@ -58,9 +158,255 @@
       "availability": [
         [
           0,
-          60
+          216
+        ]
+      ],
+      "availability_meta": {
+        "source": "calendar",
+        "binding_ids": [
+          "b_t1"
+        ],
+        "calendar_ids": [
+          "cal_rotating"
+        ],
+        "signature": "9b122ab51c51b50c",
+        "n_intervals": 1,
+        "generated_at": "2026-10-06T14:13:43"
+      }
+    }
+  ],
+  "shifts": [
+    {
+      "id": "day",
+      "name": "白班",
+      "color": "#59a14f",
+      "segments": [
+        [
+          8,
+          16
         ]
       ]
+    },
+    {
+      "id": "swing",
+      "name": "中班",
+      "color": "#edc949",
+      "segments": [
+        [
+          16,
+          24
+        ]
+      ]
+    },
+    {
+      "id": "night",
+      "name": "夜班",
+      "color": "#4e79a7",
+      "segments": [
+        [
+          0,
+          8
+        ]
+      ]
+    },
+    {
+      "id": "allday",
+      "name": "全天班",
+      "color": "#86bcb6",
+      "segments": [
+        [
+          0,
+          24
+        ]
+      ]
+    }
+  ],
+  "calendars": [
+    {
+      "id": "cal_rotating",
+      "name": "三班倒（含周末）",
+      "description": "白班 + 中班 + 夜班轮班，周末照常。",
+      "weekday_shifts": {
+        "0": [
+          "day",
+          "swing",
+          "night"
+        ],
+        "1": [
+          "day",
+          "swing",
+          "night"
+        ],
+        "2": [
+          "day",
+          "swing",
+          "night"
+        ],
+        "3": [
+          "day",
+          "swing",
+          "night"
+        ],
+        "4": [
+          "day",
+          "swing",
+          "night"
+        ],
+        "5": [
+          "day",
+          "swing",
+          "night"
+        ],
+        "6": [
+          "day",
+          "swing",
+          "night"
+        ]
+      },
+      "holidays": {}
+    },
+    {
+      "id": "cal_room",
+      "name": "场地日历",
+      "description": "全天可用，法定节假日关闭。",
+      "weekday_shifts": {
+        "0": [
+          "allday"
+        ],
+        "1": [
+          "allday"
+        ],
+        "2": [
+          "allday"
+        ],
+        "3": [
+          "allday"
+        ],
+        "4": [
+          "allday"
+        ],
+        "5": [
+          "allday"
+        ],
+        "6": [
+          "allday"
+        ]
+      },
+      "holidays": {
+        "2024-01-01": "closed"
+      }
+    },
+    {
+      "id": "cal_machine",
+      "name": "设备（周日保养）",
+      "description": "周一至周六全天可用，周日定期保养停机。",
+      "weekday_shifts": {
+        "0": [
+          "allday"
+        ],
+        "1": [
+          "allday"
+        ],
+        "2": [
+          "allday"
+        ],
+        "3": [
+          "allday"
+        ],
+        "4": [
+          "allday"
+        ],
+        "5": [
+          "allday"
+        ],
+        "6": []
+      },
+      "holidays": {
+        "2024-01-01": "closed"
+      }
+    },
+    {
+      "id": "cal_dayweek",
+      "name": "常白班（双休）",
+      "description": "周一至周五白班，周六周日休息。",
+      "weekday_shifts": {
+        "0": [
+          "day"
+        ],
+        "1": [
+          "day"
+        ],
+        "2": [
+          "day"
+        ],
+        "3": [
+          "day"
+        ],
+        "4": [
+          "day"
+        ],
+        "5": [],
+        "6": []
+      },
+      "holidays": {
+        "2024-01-01": "closed"
+      }
+    }
+  ],
+  "bindings": [
+    {
+      "id": "b_p1",
+      "resource_id": "P1",
+      "calendar_id": "cal_rotating",
+      "start_date": null,
+      "end_date": null,
+      "priority": 0,
+      "holiday_overrides": {}
+    },
+    {
+      "id": "b_p2",
+      "resource_id": "P2",
+      "calendar_id": "cal_rotating",
+      "start_date": null,
+      "end_date": null,
+      "priority": 0,
+      "holiday_overrides": {}
+    },
+    {
+      "id": "b_p3",
+      "resource_id": "P3",
+      "calendar_id": "cal_rotating",
+      "start_date": null,
+      "end_date": null,
+      "priority": 0,
+      "holiday_overrides": {}
+    },
+    {
+      "id": "b_r1",
+      "resource_id": "R1",
+      "calendar_id": "cal_room",
+      "start_date": null,
+      "end_date": null,
+      "priority": 0,
+      "holiday_overrides": {}
+    },
+    {
+      "id": "b_e1",
+      "resource_id": "E1",
+      "calendar_id": "cal_machine",
+      "start_date": null,
+      "end_date": null,
+      "priority": 0,
+      "holiday_overrides": {}
+    },
+    {
+      "id": "b_t1",
+      "resource_id": "T1",
+      "calendar_id": "cal_rotating",
+      "start_date": null,
+      "end_date": null,
+      "priority": 0,
+      "holiday_overrides": {}
     }
   ],
   "tasks": [
@@ -74,8 +420,8 @@
         "T1": 1
       },
       "dependencies": [],
-      "release_time": 0,
-      "due_date": 10,
+      "release_time": 24,
+      "due_date": 40,
       "weight": 2,
       "priority": 1.0
     },
@@ -89,8 +435,8 @@
         "T1": 1
       },
       "dependencies": [],
-      "release_time": 0,
-      "due_date": 12,
+      "release_time": 24,
+      "due_date": 42,
       "weight": 2,
       "priority": 1.0
     },
@@ -104,8 +450,8 @@
         "T1": 1
       },
       "dependencies": [],
-      "release_time": 0,
-      "due_date": 14,
+      "release_time": 24,
+      "due_date": 44,
       "weight": 2,
       "priority": 1.0
     },
@@ -121,7 +467,7 @@
         "A1"
       ],
       "release_time": 0,
-      "due_date": 22,
+      "due_date": 52,
       "weight": 1,
       "priority": 1.0
     },
@@ -137,7 +483,7 @@
         "A2"
       ],
       "release_time": 0,
-      "due_date": 24,
+      "due_date": 54,
       "weight": 1,
       "priority": 1.0
     },
@@ -153,7 +499,7 @@
         "A3"
       ],
       "release_time": 0,
-      "due_date": 26,
+      "due_date": 56,
       "weight": 1,
       "priority": 1.0
     },
@@ -162,14 +508,15 @@
       "name": "转运",
       "duration": 3,
       "resource_requirements": {
-        "P2": 1
+        "P2": 1,
+        "E1": 1
       },
       "dependencies": [
         "B1",
         "B2"
       ],
       "release_time": 0,
-      "due_date": 30,
+      "due_date": 60,
       "weight": 3,
       "priority": 1.0
     }
@@ -219,7 +566,7 @@
     "minimize": true,
     "params": {}
   },
-  "version": 1,
-  "created_at": "2026-10-05T14:04:06",
-  "updated_at": "2026-10-05T14:04:06"
+  "version": 10,
+  "created_at": "2026-10-06T14:13:43",
+  "updated_at": "2026-10-06T14:13:43"
 }

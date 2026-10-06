@@ -26,6 +26,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 RESOURCE_TYPES = ("personnel", "equipment", "time")
 
+# Monday == 0 ... Sunday == 6 (matches ``datetime.date.weekday()``).
+WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+# Special values allowed in ``CalendarTemplate.weekday_shifts`` / ``holidays``:
+#   a list of shift ids  -> those shifts are worked that day
+#   "closed"             -> the resource is unavailable all day
+#   "weekday"            -> (holidays only) fall back to the weekday plan
+DAY_PLAN_CLOSED = "closed"
+DAY_PLAN_WEEKDAY = "weekday"
+
 OBJECTIVE_TYPES = (
     "makespan",                 # min max completion time
     "total_completion",         # min sum of completion times
@@ -82,6 +93,18 @@ class Resource:
     is used by the ``resource_assignment`` constraint so a task can require a
     person or machine that possesses a particular capability rather than one
     specific instance.
+
+    ``availability_meta`` records *how* the availability list got there.  It is
+    managed by the calendar engine (``backend.calendar``) and never seen by the
+    solvers:
+
+    * ``source`` is ``calendar`` when the intervals were generated from a
+      calendar binding, or ``manual`` when a human edited the list by hand;
+    * ``binding_id`` / ``calendar_id`` point back at the generating binding;
+    * ``signature`` is a cheap hash of the binding + templates at generation
+      time, so the refresh routine can spot "generated, but template changed"
+      without re-expanding anything;
+    * ``generated_at`` is when the intervals were last generated.
     """
     id: str
     name: str = ""
@@ -90,12 +113,17 @@ class Resource:
     skills: List[str] = field(default_factory=list)
     cost_per_unit: float = 0.0              # cost per unit-time of use
     availability: Optional[List[List[int]]] = None   # [[start, end), ...]
+    availability_meta: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.type not in RESOURCE_TYPES:
             raise ValueError(f"unknown resource type: {self.type}")
         if self.capacity < 0:
             raise ValueError(f"resource {self.id}: negative capacity")
+
+    @property
+    def availability_source(self) -> str:
+        return (self.availability_meta or {}).get("source", "manual")
 
     def available_at(self, t: int) -> bool:
         if self.availability is None:
@@ -107,6 +135,97 @@ class Resource:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Resource":
+        d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        return cls(**d)
+
+
+# --------------------------------------------------------------------------- #
+# Shift / calendar templates
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class ShiftTemplate:
+    """A repeatable daily work window, e.g. 白班 / 中班 / 夜班.
+
+    ``segments`` are half-open ``[start, end)`` ranges expressed in *slot
+    offsets within a day* (0 .. ``slots_per_day``); a value larger than
+    ``slots_per_day`` is allowed on ``start`` of a segment so that a 夜班 can
+    spill past midnight (e.g. start=22, end=26 with 24 slots/day).  A day
+    plan referencing several shifts simply works the union of their segments.
+    """
+    id: str
+    name: str = ""
+    color: str = ""
+    segments: List[List[int]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ShiftTemplate":
+        d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        return cls(**d)
+
+
+@dataclass
+class CalendarTemplate:
+    """A weekly rhythm plus holiday overrides.
+
+    ``weekday_shifts`` maps a weekday index (0=Mon .. 6=Sun) to either a list
+    of shift ids or the sentinel ``"closed"``.  ``holidays`` maps an ISO date
+    string (``YYYY-MM-DD``) to a plan: list of shift ids, ``"closed"`` or
+    ``"weekday"`` (honour whatever the weekday row says).
+    """
+    id: str
+    name: str = ""
+    description: str = ""
+    weekday_shifts: Dict[str, Any] = field(default_factory=dict)
+    holidays: Dict[str, Any] = field(default_factory=dict)
+
+    def weekday_plan(self, weekday: int) -> Any:
+        return self.weekday_shifts.get(str(weekday),
+                                      self.weekday_shifts.get(weekday, DAY_PLAN_CLOSED))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "CalendarTemplate":
+        d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        return cls(**d)
+
+
+@dataclass
+class CalendarBinding:
+    """Apply a calendar template to one resource over a date range.
+
+    Several bindings may target the same resource for different date ranges
+    (e.g. a temporary night-shift stint); ``priority`` breaks overlaps
+    (higher wins).  A binding with ``start_date`` / ``end_date`` == None spans
+    the whole horizon.  ``holiday_overrides`` lets one binding deviate from the
+    template's global holiday list without editing the shared template.
+    """
+    id: str
+    resource_id: str
+    calendar_id: str
+    start_date: Optional[str] = None         # ISO date, inclusive; None = horizon start
+    end_date: Optional[str] = None           # ISO date, inclusive; None = horizon end
+    priority: int = 0
+    holiday_overrides: Dict[str, Any] = field(default_factory=dict)
+
+    def covers(self, iso_date: str) -> bool:
+        if self.start_date and iso_date < self.start_date:
+            return False
+        if self.end_date and iso_date > self.end_date:
+            return False
+        return True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "CalendarBinding":
+        d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
         return cls(**d)
 
 
@@ -232,7 +351,12 @@ class Problem:
     description: str = ""
     horizon: int = 100
     time_unit: str = "hour"
+    start_date: str = "2024-01-01"          # ISO date that slot 0 maps to
+    slots_per_day: int = 24                 # integer slots in one calendar day
     resources: List[Resource] = field(default_factory=list)
+    shifts: List[ShiftTemplate] = field(default_factory=list)
+    calendars: List[CalendarTemplate] = field(default_factory=list)
+    bindings: List[CalendarBinding] = field(default_factory=list)
     tasks: List[Task] = field(default_factory=list)
     hard_constraints: List[HardConstraint] = field(default_factory=list)
     soft_constraints: List[SoftConstraint] = field(default_factory=list)
@@ -244,6 +368,16 @@ class Problem:
     # -- convenience index helpers ---------------------------------------- #
     def resource_map(self) -> Dict[str, Resource]:
         return {r.id: r for r in self.resources}
+
+    def shift_map(self) -> Dict[str, ShiftTemplate]:
+        return {s.id: s for s in self.shifts}
+
+    def calendar_map(self) -> Dict[str, CalendarTemplate]:
+        return {c.id: c for c in self.calendars}
+
+    def bindings_for(self, resource_id: str) -> List[CalendarBinding]:
+        return sorted((b for b in self.bindings if b.resource_id == resource_id),
+                      key=lambda b: (-b.priority, b.start_date or "", b.id))
 
     def task_map(self) -> Dict[str, Task]:
         return {t.id: t for t in self.tasks}
@@ -280,6 +414,11 @@ class Problem:
     def from_dict(cls, d: Dict[str, Any]) -> "Problem":
         d = dict(d)
         d["resources"] = [Resource.from_dict(r) for r in d.get("resources", [])]
+        d["shifts"] = [ShiftTemplate.from_dict(s) for s in d.get("shifts", [])]
+        d["calendars"] = [CalendarTemplate.from_dict(c)
+                          for c in d.get("calendars", [])]
+        d["bindings"] = [CalendarBinding.from_dict(b)
+                         for b in d.get("bindings", [])]
         d["tasks"] = [Task.from_dict(t) for t in d.get("tasks", [])]
         d["hard_constraints"] = [
             HardConstraint.from_dict(c) for c in d.get("hard_constraints", [])
@@ -288,6 +427,8 @@ class Problem:
             SoftConstraint.from_dict(c) for c in d.get("soft_constraints", [])
         ]
         d["objective"] = Objective.from_dict(d.get("objective", {}))
+        allowed = set(cls.__dataclass_fields__)
+        d = {k: v for k, v in d.items() if k in allowed}
         return cls(**d)
 
 
@@ -330,6 +471,13 @@ class Solution:
     lower_bound: Optional[float] = None
     created_at: str = field(default_factory=now_iso)
     version: int = 1
+    # Provenance used by the freshness layer: problem version this artefact was
+    # computed against, a fingerprint of the solver inputs, and the (possibly
+    # empty) list of reasons it is stale relative to the current problem.
+    # ``None`` means "produced before provenance existed" -> unverified.
+    problem_version: Optional[int] = None
+    input_fingerprint: Optional[str] = None
+    stale_reasons: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -375,12 +523,17 @@ class SensitivityResult:
     parameter: str
     variations: List[Dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=now_iso)
+    problem_version: Optional[int] = None
+    input_fingerprint: Optional[str] = None
+    spec: Dict[str, Any] = field(default_factory=dict)
+    stale_reasons: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SensitivityResult":
+        d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
         return cls(**d)
 
 
@@ -392,18 +545,31 @@ class Report:
     format: str = "markdown"
     content: str = ""
     created_at: str = field(default_factory=now_iso)
+    problem_version: Optional[int] = None
+    input_fingerprint: Optional[str] = None
+    solution_ids: List[str] = field(default_factory=list)
+    sensitivity_id: Optional[str] = None
+    stale_reasons: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Report":
+        d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
         return cls(**d)
 
 
 # --------------------------------------------------------------------------- #
 # Cross-cutting validation used by storage and API
 # --------------------------------------------------------------------------- #
+
+def _plan_shift_ids(plan: Any) -> List[str]:
+    """Extract referenced shift ids from a day-plan value (list / sentinel)."""
+    if isinstance(plan, (list, tuple)):
+        return [str(x) for x in plan]
+    return []
+
 
 def validate_problem(problem: Problem) -> List[str]:
     """Return a list of human-readable validation errors (empty == valid)."""
@@ -417,8 +583,52 @@ def validate_problem(problem: Problem) -> List[str]:
     if len(rids) != len(set(rids)):
         errors.append("resource ids must be unique")
 
+    sids = [s.id for s in problem.shifts]
+    if len(sids) != len(set(sids)):
+        errors.append("shift ids must be unique")
+    if problem.slots_per_day <= 0:
+        errors.append("slots_per_day must be positive")
+    import datetime as _dt
+    try:
+        _dt.date.fromisoformat(problem.start_date)
+    except (ValueError, TypeError):
+        errors.append(f"start_date must be ISO YYYY-MM-DD: {problem.start_date!r}")
+    for s in problem.shifts:
+        if not s.segments:
+            errors.append(f"shift {s.id}: at least one segment is required")
+        for a, b in s.segments:
+            if a < 0 or b <= a:
+                errors.append(f"shift {s.id}: segment [{a}, {b}) is invalid")
+
+    cids = [c.id for c in problem.calendars]
+    if len(cids) != len(set(cids)):
+        errors.append("calendar ids must be unique")
+    shift_set = set(sids)
+    for c in problem.calendars:
+        for key, plan in list(c.weekday_shifts.items()) + list(c.holidays.items()):
+            for ref in _plan_shift_ids(plan):
+                if ref not in shift_set:
+                    errors.append(f"calendar {c.id}: unknown shift '{ref}'")
+
     tasks = problem.task_map()
     res = problem.resource_map()
+    cal_set = set(cids)
+
+    bids = [b.id for b in problem.bindings]
+    if len(bids) != len(set(bids)):
+        errors.append("binding ids must be unique")
+    for b in problem.bindings:
+        if b.resource_id not in res:
+            errors.append(f"binding {b.id}: unknown resource '{b.resource_id}'")
+        if b.calendar_id not in cal_set:
+            errors.append(f"binding {b.id}: unknown calendar '{b.calendar_id}'")
+        if b.start_date and b.end_date and b.start_date > b.end_date:
+            errors.append(f"binding {b.id}: start_date after end_date")
+        for ref in _plan_shift_ids(b.holiday_overrides.values()
+                                   if isinstance(b.holiday_overrides, dict)
+                                   else []):
+            if ref not in shift_set:
+                errors.append(f"binding {b.id}: unknown shift '{ref}'")
 
     for t in problem.tasks:
         if t.duration <= 0:

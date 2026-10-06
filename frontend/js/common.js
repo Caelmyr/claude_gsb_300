@@ -12,6 +12,16 @@ const SOFT_CONSTRAINT_TYPES = ['due_date', 'preferred_window', 'min_gap',
   'resource_balance', 'setup_time', 'max_makespan'];
 const SOLVER_NAMES = ['lp', 'ip', 'genetic', 'simulated_annealing', 'greedy'];
 
+/* Monday == 0 ... Sunday == 6, matching backend WEEKDAY_*. */
+const WEEKDAYS = [
+  { index: 0, label: '周一' }, { index: 1, label: '周二' },
+  { index: 2, label: '周三' }, { index: 3, label: '周四' },
+  { index: 4, label: '周五' }, { index: 5, label: '周六' },
+  { index: 6, label: '周日' },
+];
+const DAY_PLAN_CLOSED = 'closed';
+const DAY_PLAN_WEEKDAY = 'weekday';
+
 const SOLVER_LABELS = {
   lp: '线性规划（松弛）',
   ip: '整数规划（分支定界）',
@@ -125,6 +135,7 @@ function toast(msg, type = 'ok') {
 const NAV = [
   ['index.html', '仪表盘'],
   ['resources.html', '资源管理'],
+  ['calendar.html', '班次/日历'],
   ['tasks.html', '任务与依赖'],
   ['constraints.html', '约束配置'],
   ['solvers.html', '求解器与参数'],
@@ -145,11 +156,15 @@ function renderNav(active) {
 }
 
 /* Wire up the shared sidebar (navigation + problem picker). */
-function initSidebar(active) {
+function initSidebar(active, { staleBanner = true } = {}) {
   renderNav(active);
   const sel = document.getElementById('problem-picker');
   if (sel) {
     renderProblemPicker(sel, (id) => { setProblemParam(id); location.reload(); });
+  }
+  if (staleBanner && active !== 'index.html') {
+    const pid = currentProblemId();
+    if (pid) mountStaleBanner(pid);
   }
 }
 
@@ -187,6 +202,80 @@ function statusBadge(status) {
   const cls = { optimal: 'ok', feasible: 'info', infeasible: 'bad',
     timeout: 'warn', error: 'bad' }[status] || 'muted';
   return `<span class="badge ${cls}">${escapeHtml(statusLabel(status))}</span>`;
+}
+
+/* ---- result freshness ----------------------------------------------- */
+const FRESHNESS_LABELS = {
+  current: '有效',
+  stale: '已失效',
+  unverified: '无法核对',
+};
+
+function freshnessInfo(item) {
+  // Tolerate legacy items without provenance.
+  if (!item.freshness) {
+    return item.input_fingerprint == null
+      ? { state: 'unverified', stale: true, reasons: ['结果生成于版本追溯功能上线前，无法自动核对'] }
+      : { state: 'current', stale: false, reasons: [] };
+  }
+  return { state: item.freshness, stale: !!item.stale,
+           reasons: item.stale_reasons || [] };
+}
+
+function freshnessBadge(item) {
+  const info = freshnessInfo(item);
+  const cls = { current: 'ok', stale: 'bad', unverified: 'warn' }[info.state] || 'muted';
+  const title = info.reasons.length ? escapeHtml(info.reasons.join('\n')) : '输入未变，结果有效';
+  return `<span class="badge ${cls} freshness-badge" title="${title}">${
+      escapeHtml(FRESHNESS_LABELS[info.state] || info.state)}</span>`;
+}
+
+function freshnessReasons(reasons) {
+  if (!reasons || !reasons.length) return '';
+  return `<ul class="stale-reasons">${reasons.map(r =>
+    `<li>${escapeHtml(r)}</li>`).join('')}</ul>`;
+}
+
+/* Fetch /api/problems/<id>/freshness once per page and render a dismissible
+ * banner listing every artefact that needs re-running.  Used on every page
+ * that shows solutions / analyses / reports. */
+async function mountStaleBanner(problemId) {
+  if (!problemId) return null;
+  let summary;
+  try { summary = await api(`/problems/${problemId}/freshness`); }
+  catch (_) { return null; }
+  const c = summary.counts;
+  if (!c.stale_total) return summary;
+
+  const groups = [
+    ['排程方案', summary.solutions],
+    ['敏感性分析', summary.sensitivity],
+    ['报告', summary.reports],
+  ];
+  const items = [];
+  for (const [label, rows] of groups) {
+    for (const r of rows) {
+      if (!r.stale) continue;
+      const state = FRESHNESS_LABELS[r.freshness || 'stale'] || r.freshness;
+      items.push(`<li><b>${label} ${escapeHtml(r.id)}</b>
+        <span class="badge ${r.freshness === 'unverified' ? 'warn' : 'bad'}">${escapeHtml(state)}</span>
+        ${freshnessReasons((r.stale_reasons || []).slice(0, 3))}</li>`);
+    }
+  }
+  const banner = document.createElement('div');
+  banner.className = 'stale-banner';
+  banner.innerHTML = `
+    <div class="stale-banner-head">
+      ⚠️ 班次/输入已变更（实例 v${summary.problem_version}）：${c.stale_total} 个历史结果需要重跑
+      （方案 ${c.solutions_stale}/${c.solutions_total}，
+       分析 ${c.sensitivity_stale}/${c.sensitivity_total}，
+       报告 ${c.reports_stale}/${c.reports_total}）
+      <button class="btn sm danger" onclick="this.closest('.stale-banner').remove()">忽略本提示</button>
+    </div>
+    <ul class="stale-banner-list">${items.join('')}</ul>`;
+  const main = document.querySelector('.main');
+  if (main) main.prepend(banner);
+  return summary;
 }
 
 /* ---- DOM helpers ----------------------------------------------------- */

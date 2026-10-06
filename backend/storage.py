@@ -304,6 +304,8 @@ def list_solutions(problem_id: str) -> List[Dict[str, Any]]:
             "solve_time": d.get("solve_time"),
             "created_at": d.get("created_at"),
             "n_assignments": len(d.get("assignments", [])),
+            "problem_version": d.get("problem_version"),
+            "input_fingerprint": d.get("input_fingerprint"),
         })
     return sorted(out, key=lambda s: s.get("created_at", ""))
 

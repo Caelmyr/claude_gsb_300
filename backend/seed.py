@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import os
 from typing import List
 
+from . import calendar as cal_engine
 from . import models, storage
+
+
+# 2024-01-01 is a Monday -- convenient for weekly calendars.
+SEED_START_DATE = "2024-01-01"
 
 
 def _jobshop() -> models.Problem:
@@ -14,6 +20,8 @@ def _jobshop() -> models.Problem:
         description="3 个作业在 2 台机器上加工，含先后顺序链，目标为最小化完工时间。",
         horizon=40,
         time_unit="小时",
+        start_date=SEED_START_DATE,
+        slots_per_day=24,
         resources=[
             models.Resource(id="M1", name="机器 A", type="equipment", capacity=1,
                             cost_per_unit=5.0),
@@ -40,46 +48,107 @@ def _jobshop() -> models.Problem:
 
 
 def _staffing() -> models.Problem:
+    # ---- templates: 白班 / 中班 / 夜班, each 8h, covering the 24h day ----
+    shifts = [
+        models.ShiftTemplate(id="day", name="白班", color="#59a14f",
+                             segments=[[8, 16]]),
+        models.ShiftTemplate(id="swing", name="中班", color="#edc949",
+                             segments=[[16, 24]]),
+        models.ShiftTemplate(id="night", name="夜班", color="#4e79a7",
+                             segments=[[0, 8]]),
+        models.ShiftTemplate(id="allday", name="全天班", color="#86bcb6",
+                             segments=[[0, 24]]),
+    ]
+    weekend = {str(i): [] for i in (5, 6)}
+    sunday_closed = {"6": []}
+
+    # 三班倒：每天三个班次都有人（资源级绑定决定谁上哪个班）。
+    cal_rotating = models.CalendarTemplate(
+        id="cal_rotating", name="三班倒（含周末）",
+        description="白班 + 中班 + 夜班轮班，周末照常。",
+        weekday_shifts={str(i): ["day", "swing", "night"] for i in range(7)},
+    )
+    # 全天可用的场地，仅元旦关闭。
+    cal_room = models.CalendarTemplate(
+        id="cal_room", name="场地日历",
+        description="全天可用，法定节假日关闭。",
+        weekday_shifts={str(i): ["allday"] for i in range(7)},
+        holidays={"2024-01-01": "closed"},
+    )
+    # 设备日历：周一至周六可用，周日停机保养（节假日照常关闭）。
+    cal_machine = models.CalendarTemplate(
+        id="cal_machine", name="设备（周日保养）",
+        description="周一至周六全天可用，周日定期保养停机。",
+        weekday_shifts={**{str(i): ["allday"] for i in range(6)}, **sunday_closed},
+        holidays={"2024-01-01": "closed"},
+    )
+    # 常白班：周一至周五白班，周末休息（供临时绑定/演示用）。
+    cal_dayweek = models.CalendarTemplate(
+        id="cal_dayweek", name="常白班（双休）",
+        description="周一至周五白班，周六周日休息。",
+        weekday_shifts={**{str(i): ["day"] for i in range(5)}, **weekend},
+        holidays={"2024-01-01": "closed"},   # 元旦
+    )
+
     p = models.Problem(
         id="demo_staffing",
         name="班次排班示例",
-        description="带技能的人员、硬时间窗口与软截止/偏好惩罚；目标为加权完工时间。",
-        horizon=60,
+        description="白班/中班/夜班三班倒，含周末双休、节假日与周日设备保养；目标为加权完工时间。",
+        horizon=216,
         time_unit="小时",
+        start_date=SEED_START_DATE,
+        slots_per_day=24,
+        shifts=shifts,
+        calendars=[cal_rotating, cal_room, cal_machine, cal_dayweek],
         resources=[
-            models.Resource(id="P1", name="护士甲", type="personnel", capacity=1,
+            models.Resource(id="P1", name="护士甲（三班倒）", type="personnel", capacity=1,
                             skills=["护理"], cost_per_unit=12.0),
-            models.Resource(id="P2", name="护士乙", type="personnel", capacity=1,
+            models.Resource(id="P2", name="护士乙（三班倒）", type="personnel", capacity=1,
                             skills=["护理", "转运"], cost_per_unit=10.0),
-            models.Resource(id="P3", name="护士丙", type="personnel", capacity=1,
+            models.Resource(id="P3", name="护士丙（三班倒）", type="personnel", capacity=1,
                             skills=["护理"], cost_per_unit=11.0),
             models.Resource(id="R1", name="检查室", type="equipment", capacity=2,
                             cost_per_unit=2.0),
-            models.Resource(id="T1", name="日班", type="time", capacity=3,
-                            availability=[[0, 60]]),
+            models.Resource(id="E1", name="超声设备（周日保养）", type="equipment", capacity=1,
+                            cost_per_unit=4.0),
+            models.Resource(id="T1", name="班次时段", type="time", capacity=3),
+        ],
+        bindings=[
+            models.CalendarBinding(id="b_p1", resource_id="P1",
+                                   calendar_id="cal_rotating"),
+            models.CalendarBinding(id="b_p2", resource_id="P2",
+                                   calendar_id="cal_rotating"),
+            models.CalendarBinding(id="b_p3", resource_id="P3",
+                                   calendar_id="cal_rotating"),
+            models.CalendarBinding(id="b_r1", resource_id="R1",
+                                   calendar_id="cal_room"),
+            models.CalendarBinding(id="b_e1", resource_id="E1",
+                                   calendar_id="cal_machine"),
+            models.CalendarBinding(id="b_t1", resource_id="T1",
+                                   calendar_id="cal_rotating"),
         ],
         tasks=[
             models.Task(id="A1", name="入院1", duration=6,
                         resource_requirements={"P1": 1, "R1": 1, "T1": 1},
-                        release_time=0, due_date=10, weight=2),
+                        release_time=24, due_date=40, weight=2),
             models.Task(id="A2", name="入院2", duration=6,
                         resource_requirements={"P2": 1, "R1": 1, "T1": 1},
-                        release_time=0, due_date=12, weight=2),
+                        release_time=24, due_date=42, weight=2),
             models.Task(id="A3", name="入院3", duration=6,
                         resource_requirements={"P3": 1, "R1": 1, "T1": 1},
-                        release_time=0, due_date=14, weight=2),
+                        release_time=24, due_date=44, weight=2),
             models.Task(id="B1", name="治疗1", duration=8,
                         resource_requirements={"P1": 1, "T1": 1},
-                        dependencies=["A1"], due_date=22, weight=1),
+                        dependencies=["A1"], due_date=52, weight=1),
             models.Task(id="B2", name="治疗2", duration=8,
                         resource_requirements={"P2": 1, "T1": 1},
-                        dependencies=["A2"], due_date=24, weight=1),
+                        dependencies=["A2"], due_date=54, weight=1),
             models.Task(id="B3", name="治疗3", duration=8,
                         resource_requirements={"P3": 1, "T1": 1},
-                        dependencies=["A3"], due_date=26, weight=1),
+                        dependencies=["A3"], due_date=56, weight=1),
             models.Task(id="C1", name="转运", duration=3,
-                        resource_requirements={"P2": 1},
-                        dependencies=["B1", "B2"], due_date=30, weight=3),
+                        resource_requirements={"P2": 1, "E1": 1},
+                        dependencies=["B1", "B2"], due_date=60, weight=3),
         ],
         hard_constraints=[
             models.HardConstraint(id="hc1", type="time_window",
@@ -96,6 +165,9 @@ def _staffing() -> models.Problem:
         ],
         objective=models.Objective(type="weighted_completion"),
     )
+    # Generate the initial availability intervals from the templates so the
+    # instance is immediately solvable and provenance starts life consistent.
+    cal_engine.refresh_all(p)
     return p
 
 
@@ -136,12 +208,23 @@ def _large() -> models.Problem:
 
 
 def seed_all(force: bool = False) -> List[str]:
-    """Create the example instances if they do not already exist."""
+    """Create the example instances if they do not already exist.
+
+    With ``force`` the demo instances are rebuilt from scratch, including
+    deleting previously generated (and therefore possibly stale) solutions,
+    sensitivity runs and reports so the shipped data starts self-consistent."""
     created: List[str] = []
     for builder in (_jobshop, _staffing, _large):
         problem = builder()
-        if not force and storage.load_problem(problem.id) is not None:
+        existed = storage.load_problem(problem.id) is not None
+        if not force and existed:
             continue
+        if force and existed:
+            import shutil
+            for sub in ("solutions", "sensitivity", "reports", "configs", "versions"):
+                d = os.path.join(storage.instance_dir(problem.id), sub)
+                if os.path.isdir(d):
+                    shutil.rmtree(d)
         storage.save_problem(problem)
         created.append(problem.id)
     return created

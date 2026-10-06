@@ -127,7 +127,10 @@ def run_sensitivity(problem: models.Problem,
         base_objective=round(base_obj, 4) if base_obj is not None else None,
         parameter=f"{spec.get('kind')}:{spec.get('resource') or spec.get('task') or ''}",
         variations=variations,
+        spec=spec,
     )
+    from . import freshness
+    freshness.stamp_sensitivity(problem, result)
     if persist:
         storage.save_sensitivity(problem.id, result)
     return result

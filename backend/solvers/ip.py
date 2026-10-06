@@ -36,10 +36,9 @@ class IPSolver(Solver):
         try:
             model = time_indexed.build(problem)
         except ValueError as exc:
-            return models.Solution(
-                id=models.new_id("sol"), problem_id=problem.id, solver=self.name,
-                status="error", message=str(exc), params=params,
-                solve_time=round(time.time() - t0, 4))
+            return self.make_error_solution(
+                problem, str(exc),
+                solve_time=round(time.time() - t0, 4), params=params)
 
         # initial incumbent: LP-guided heuristic (a strong upper bound that lets
         # the best-first search prune aggressively), falling back to greedy.

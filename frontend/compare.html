@@ -68,11 +68,15 @@ async function load() {
 
 function renderChecks() {
   const el = document.getElementById('solution-checks');
-  el.innerHTML = solutions.map((s, i) => `
-    <label style="margin:0 16px 8px 0;font-size:13px;color:var(--ink)">
-      <input type="checkbox" value="${s.id}" style="width:auto;margin-right:5px">
+  el.innerHTML = solutions.map((s, i) => {
+    const info = freshnessInfo(s);
+    return `
+    <label style="margin:0 16px 8px 0;font-size:13px;color:${info.stale ? '#991b1b' : 'var(--ink)'}">
+      <input type="checkbox" value="${s.id}" ${info.stale ? '' : 'checked'} style="width:auto;margin-right:5px">
       ${escapeHtml(solverLabel(s.solver))} <span class="muted">(${fmt(s.objective_value)})</span>
-    </label>`).join('') || '<span class="muted">暂无求解结果。</span>';
+      ${freshnessBadge(s)}
+    </label>`;
+  }).join('') || '<span class="muted">暂无求解结果。</span>';
 }
 
 function selected() {
@@ -86,6 +90,8 @@ function toggleAll(on) {
 async function compare() {
   const ids = selected();
   if (!ids.length) return toast('请至少选择一个方案', 'error');
+  if (ids.some(id => freshnessInfo(solutions.find(s => s.id === id)).stale) &&
+      !confirm('选中的方案中包含已失效结果，其目标值不再对应当前班次，仍要对比吗？')) return;
   const { solutions: rows } = await api(`/problems/${problem.id}/compare`, {
     method: 'POST', body: JSON.stringify({ solution_ids: ids }),
   });
@@ -95,9 +101,12 @@ async function compare() {
     values: rows.map(s => s.objective_value ?? 0),
     color: '#59a14f',
   });
-  document.getElementById('rows').innerHTML = rows.map(s => `
-    <tr ${s.is_best ? 'style="background:#f0fdf4"' : ''}>
-      <td>${escapeHtml(solverLabel(s.solver))} ${s.is_best ? '<span class="badge ok">最优</span>' : ''}</td>
+  document.getElementById('rows').innerHTML = rows.map(s => {
+    const meta = solutions.find(x => x.id === s.id) || {};
+    const info = freshnessInfo(meta);
+    return `
+    <tr style="${info.stale ? 'background:#fef2f2' : (s.is_best ? 'background:#f0fdf4' : '')}">
+      <td>${escapeHtml(solverLabel(s.solver))} ${s.is_best ? '<span class="badge ok">最优</span>' : ''} ${freshnessBadge(meta)}</td>
       <td>${statusBadge(s.status)}</td>
       <td class="num"><b>${fmt(s.objective_value)}</b></td>
       <td class="num">${s.delta_vs_best == null ? '—' : (s.delta_vs_best > 0 ? '+' : '') + fmt(s.delta_vs_best)}</td>
@@ -107,15 +116,18 @@ async function compare() {
       <td class="num">${fmt(s.solve_time)}</td>
       <td class="num">${fmt(s.lower_bound)}</td>
       <td><a href="gantt.html?id=${encodeURIComponent(problem.id)}&solution=${encodeURIComponent(s.id)}">甘特图</a></td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
 }
 
 function renderAll() {
   document.getElementById('all-rows').innerHTML = solutions.map(s => `
-    <tr><td class="mono">${escapeHtml(s.id)}</td><td>${escapeHtml(solverLabel(s.solver))}</td>
+    <tr style="${freshnessInfo(s).stale ? 'background:#fef2f2' : ''}">
+      <td class="mono">${escapeHtml(s.id)}</td><td>${escapeHtml(solverLabel(s.solver))}</td>
+      <td>${freshnessBadge(s)}</td>
       <td class="num">${fmt(s.objective_value)}</td><td class="num">${fmt(s.makespan)}</td>
       <td class="small muted">${escapeHtml(s.created_at)}</td></tr>`).join('')
-    || '<tr><td colspan="5" class="empty">暂无求解结果。</td></tr>';
+    || '<tr><td colspan="6" class="empty">暂无方案。</td></tr>';
 }
 
 load().catch(e => toast(e.message, 'error'));

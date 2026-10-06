@@ -29,21 +29,19 @@ class LPSolver(Solver):
         try:
             model = time_indexed.build(problem)
         except ValueError as exc:
-            return models.Solution(
-                id=models.new_id("sol"), problem_id=problem.id, solver=self.name,
-                status="error", message=str(exc), params=params,
-                solve_time=round(time.time() - t0, 4))
+            return self.make_error_solution(
+                problem, str(exc),
+                solve_time=round(time.time() - t0, 4), params=params)
 
         res = simplex.linprog(model.c, model.A_ub, model.b_ub,
                               model.A_eq, model.b_eq)
 
         elapsed = time.time() - t0
         if res.status == "infeasible":
-            return models.Solution(
-                id=models.new_id("sol"), problem_id=problem.id, solver=self.name,
-                status="infeasible", message="LP relaxation is infeasible",
-                lower_bound=res.objective, params=params,
-                solve_time=round(elapsed, 4))
+            return self.make_error_solution(
+                problem, "LP relaxation is infeasible", status="infeasible",
+                solve_time=round(elapsed, 4), params=params,
+                lower_bound=res.objective)
 
         expected = time_indexed.solution_from_x(problem, model, res.x)
         priorities = time_indexed.expected_starts_to_priorities(expected)

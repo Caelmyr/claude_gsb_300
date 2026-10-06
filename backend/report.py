@@ -80,11 +80,38 @@ def sensitivity_markdown(result: models.SensitivityResult) -> str:
     return "\n".join(lines)
 
 
+def _stale_warning(problem: models.Problem,
+                   solutions: List[models.Solution],
+                   sensitivity: Optional[models.SensitivityResult]) -> List[str]:
+    """Return report lines warning about artefacts already stale at generation
+    time, so the warning travels *inside* an exported/printed report too."""
+    from . import freshness
+    lines: List[str] = []
+    bad = []
+    for s in solutions:
+        info = freshness.evaluate_solution(problem, s)
+        if info["stale"]:
+            bad.append(f"{s.id}（{'；'.join(info['stale_reasons'][:2])}）")
+    if bad:
+        lines.append("> ⚠️ **以下方案基于旧班次/输入，结果可能已失效，请重排后再执行：** "
+                     + "、".join(bad))
+        lines.append("")
+    if sensitivity is not None:
+        info = freshness.evaluate_sensitivity(
+            problem, sensitivity)
+        if info["stale"]:
+            lines.append("> ⚠️ **本报告引用的敏感性分析已失效：** "
+                         + "；".join(info["stale_reasons"][:2]))
+            lines.append("")
+    return lines
+
+
 def generate_report(problem: models.Problem,
                     solutions: Optional[List[models.Solution]] = None,
                     sensitivity: Optional[models.SensitivityResult] = None,
                     title: Optional[str] = None,
-                    persist: bool = True) -> models.Report:
+                    persist: bool = True,
+                    solution_ids: Optional[List[str]] = None) -> models.Report:
     solutions = solutions or []
     lines = [
         f"# 排程报告：{problem.name or problem.id}",
@@ -95,6 +122,9 @@ def generate_report(problem: models.Problem,
         f"- **目标**: {models.objective_summary(problem)}",
         f"- **生成时间**: {models.now_iso()}",
         "",
+    ]
+    lines += _stale_warning(problem, solutions, sensitivity)
+    lines += [
         "## 资源",
         "",
         "| ID | 名称 | 类型 | 容量 | 单位成本 |",
@@ -133,6 +163,10 @@ def generate_report(problem: models.Problem,
         format="markdown",
         content=content,
     )
+    ids = solution_ids if solution_ids is not None else [s.id for s in solutions]
+    from . import freshness
+    freshness.stamp_report(problem, report, solution_ids=ids,
+                           sensitivity_id=sensitivity.id if sensitivity else None)
     if persist:
         storage.save_report(problem.id, report)
     return report

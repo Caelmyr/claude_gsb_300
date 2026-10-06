@@ -16,7 +16,8 @@ import json
 import sys
 from typing import Any, Dict, List
 
-from backend import models, report, seed, sensitivity, storage
+from backend import calendar, models, report, seed, sensitivity, storage
+from backend import freshness
 from backend.solvers import base as solver_base
 
 
@@ -111,6 +112,108 @@ def cmd_report(args) -> None:
     print(rep.content)
 
 
+# --------------------------------------------------------------------------- #
+# Calendar templates & freshness
+# --------------------------------------------------------------------------- #
+
+def cmd_calendar_show(args) -> None:
+    p = storage.load_problem(args.id)
+    if p is None:
+        print(f"no such problem: {args.id}")
+        sys.exit(1)
+    print(f"anchor: {p.start_date}  slots/day: {p.slots_per_day}  horizon: {p.horizon}")
+    print("\n[shifts]")
+    for s in p.shifts:
+        segs = ", ".join(f"{a}-{b}" for a, b in s.segments)
+        print(f"  {s.id:10s} {s.name:10s} {segs}")
+    print("\n[calendars]")
+    for c in p.calendars:
+        print(f"  {c.id:14s} {c.name}")
+        for w in range(7):
+            print(f"      {models.WEEKDAY_NAMES[w]}: {c.weekday_plan(w)}")
+        for d, plan in sorted(c.holidays.items()):
+            print(f"      holiday {d}: {plan}")
+    print("\n[bindings]")
+    for b in p.bindings:
+        print(f"  {b.id:8s} {b.resource_id:6s} -> {b.calendar_id:14s} "
+              f"{b.start_date or '...'}..{b.end_date or '...'} prio={b.priority}")
+    print("\n[resource availability]")
+    for r in p.resources:
+        meta = r.availability_meta or {}
+        tag = meta.get("source", "manual")
+        ivs = "(always)" if r.availability is None else \
+              ", ".join(f"{a}-{b}" for a, b in r.availability) or "(closed)"
+        print(f"  {r.id:6s} [{tag}] {ivs}")
+
+
+def cmd_calendar_preview(args) -> None:
+    p = storage.load_problem(args.id)
+    if p is None:
+        print(f"no such problem: {args.id}")
+        sys.exit(1)
+    rows = calendar.preview_refresh(p, args.resources or None)
+    for row in rows:
+        flag = "CHANGED" if row["changed"] else "same   "
+        ivs = ", ".join(f"{a}-{b}" for a, b in row["intervals"]) or "(closed)"
+        print(f"  {flag} {row['resource_id']:8s} {ivs}")
+        if row["manual_overwrite"]:
+            print(f"          ! would overwrite a hand-edited list")
+
+
+def cmd_calendar_refresh(args) -> None:
+    p = storage.load_problem(args.id)
+    if p is None:
+        print(f"no such problem: {args.id}")
+        sys.exit(1)
+    if args.dry_run:
+        cmd_calendar_preview(args)
+        return
+    result = calendar.refresh_all(p, args.resources or None)
+    storage.save_problem(p)
+    print(f"refreshed -> problem v{p.version}: "
+          f"{result['n_changed']} changed, {result['n_unchanged']} unchanged")
+    for row in result["changed"]:
+        extra = " (overwrote manual edit)" if row["had_manual_edit"] else ""
+        print(f"  changed {row['resource_id']}: {row['n_intervals']} interval(s){extra}")
+    summary = freshness.freshness_summary(p)
+    c = summary["counts"]
+    print(f"stale after refresh: {c['stale_total']} "
+          f"(solutions {c['solutions_stale']}/{c['solutions_total']}, "
+          f"sensitivity {c['sensitivity_stale']}/{c['sensitivity_total']}, "
+          f"reports {c['reports_stale']}/{c['reports_total']})")
+
+
+def _print_freshness_rows(rows, label) -> None:
+    for r in rows:
+        if not r["stale"]:
+            continue
+        state = r.get("freshness", "stale")
+        rid = r.get("id", "?")
+        print(f"  [{state}] {label} {rid}")
+        for reason in r.get("stale_reasons", [])[:4]:
+            print(f"        - {reason}")
+
+
+def cmd_stale(args) -> None:
+    p = storage.load_problem(args.id)
+    if p is None:
+        print(f"no such problem: {args.id}")
+        sys.exit(1)
+    summary = freshness.freshness_summary(p)
+    c = summary["counts"]
+    print(f"instance {p.id} v{p.version}  fingerprint={summary['current_fingerprint']}")
+    print(f"solutions  : {c['solutions_stale']}/{c['solutions_total']} need attention")
+    print(f"sensitivity: {c['sensitivity_stale']}/{c['sensitivity_total']} need attention")
+    print(f"reports    : {c['reports_stale']}/{c['reports_total']} need attention")
+    if not c["stale_total"]:
+        print("all results are current.")
+        return
+    print("\nstale / unverified artefacts:")
+    _print_freshness_rows(summary["solutions"], "solution")
+    _print_freshness_rows(summary["sensitivity"], "sensitivity")
+    _print_freshness_rows(summary["reports"], "report")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="OR scheduling CLI")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -150,6 +253,26 @@ def main() -> None:
     p_rep.add_argument("id")
     p_rep.add_argument("--solutions", nargs="*", default=[])
     p_rep.set_defaults(func=cmd_report)
+
+    p_cal = sub.add_parser("calendar", help="show shifts, calendars, bindings")
+    p_cal.add_argument("id")
+    p_cal.set_defaults(func=cmd_calendar_show)
+
+    p_prev = sub.add_parser("calendar-preview", help="dry-run template expansion")
+    p_prev.add_argument("id")
+    p_prev.add_argument("--resources", nargs="*", default=None)
+    p_prev.set_defaults(func=cmd_calendar_preview)
+
+    p_ref = sub.add_parser("calendar-refresh",
+                           help="regenerate availability from templates and show stale results")
+    p_ref.add_argument("id")
+    p_ref.add_argument("--resources", nargs="*", default=None)
+    p_ref.add_argument("--dry-run", action="store_true")
+    p_ref.set_defaults(func=cmd_calendar_refresh)
+
+    p_stale = sub.add_parser("stale", help="list stale/unverified solutions, analyses and reports")
+    p_stale.add_argument("id")
+    p_stale.set_defaults(func=cmd_stale)
 
     args = parser.parse_args()
     args.func(args)

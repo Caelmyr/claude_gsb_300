@@ -23,6 +23,8 @@
 
     <div class="grid cols-4" id="stats"></div>
 
+    <div id="stale-overview"></div>
+
     <div class="card">
       <h2>问题实例</h2>
       <table>
@@ -42,7 +44,7 @@
       <h2>最近求解结果</h2>
       <table>
         <thead><tr>
-          <th>实例</th><th>求解器</th><th>状态</th>
+          <th>实例</th><th>求解器</th><th>状态</th><th>有效性</th>
           <th class="num">目标值</th><th class="num">完工时间</th><th>时间</th>
         </tr></thead>
         <tbody id="latest-rows"></tbody>
@@ -53,6 +55,39 @@
 <script src="js/common.js"></script>
 <script>
 initSidebar('index.html');
+
+async function loadStaleOverview() {
+  const { problems } = await api('/problems');
+  const blocks = [];
+  let totalStale = 0;
+  for (const p of problems) {
+    let s;
+    try { s = await api(`/problems/${p.id}/freshness`); } catch (_) { continue; }
+    const c = s.counts;
+    if (!c.stale_total) continue;
+    totalStale += c.stale_total;
+    const rows = [
+      ...s.solutions.filter(x => x.stale).map(x => ['方案', x]),
+      ...s.sensitivity.filter(x => x.stale).map(x => ['分析', x]),
+      ...s.reports.filter(x => x.stale).map(x => ['报告', x]),
+    ];
+    blocks.push(`
+      <div class="stale-banner" style="margin-bottom:12px">
+        <div class="stale-banner-head">
+          <a href="calendar.html?id=${encodeURIComponent(p.id)}">${escapeHtml(p.name || p.id)}</a>
+          v${s.problem_version}：${c.stale_total} 个结果因班次/输入变更需重排
+          （方案 ${c.solutions_stale}/${c.solutions_total}，分析 ${c.sensitivity_stale}/${c.sensitivity_total}，报告 ${c.reports_stale}/${c.reports_total}）
+        </div>
+        <ul class="stale-banner-list">${rows.slice(0, 6).map(([label, x]) =>
+          `<li><b>${label} ${escapeHtml(x.id)}</b> ${freshnessBadge(x)}
+            ${freshnessReasons((x.stale_reasons || []).slice(0, 2))}</li>`).join('')}
+        ${rows.length > 6 ? `<li class="muted">…另有 ${rows.length - 6} 个，详见各功能页</li>` : ''}</ul>
+      </div>`);
+  }
+  document.getElementById('stale-overview').innerHTML = blocks.length
+    ? `<div class="card" style="border-color:#fca5a5"><h2 style="color:#991b1b">⚠️ 需要重排（${totalStale}）</h2>${blocks.join('')}
+       <p class="small muted" style="margin:6px 0 0">这些结果仍保留在历史记录中，但已明确标记为失效，避免拿着旧排程执行。</p></div>` : '';
+}
 
 async function loadStats() {
   const { problems } = await api('/problems');
@@ -93,14 +128,15 @@ async function loadLatest() {
   }
   rows.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
   document.getElementById('latest-rows').innerHTML = rows.slice(0, 12).map(s => `
-    <tr>
+    <tr style="${freshnessInfo(s).stale ? 'background:#fef2f2' : ''}">
       <td class="mono">${escapeHtml(s.problem)}</td>
       <td>${escapeHtml(solverLabel(s.solver))}</td>
       <td>${statusBadge(s.status)}</td>
+      <td>${freshnessBadge(s)}</td>
       <td class="num">${fmt(s.objective_value)}</td>
       <td class="num">${fmt(s.makespan)}</td>
       <td class="small muted">${escapeHtml(s.created_at)}</td>
-    </tr>`).join('') || '<tr><td colspan="6" class="empty">暂无求解结果。</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="7" class="empty">暂无求解结果。</td></tr>';
 }
 
 function statTile(value, label, hint) {
@@ -110,6 +146,7 @@ function statTile(value, label, hint) {
 
 loadStats().catch(e => toast(e.message, 'error'));
 loadLatest().catch(e => toast(e.message, 'error'));
+loadStaleOverview().catch(e => toast(e.message, 'error'));
 </script>
 </body>
 </html>

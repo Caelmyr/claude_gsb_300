@@ -42,7 +42,7 @@
 
     <div class="card">
       <h2>已保存的报告</h2>
-      <table><thead><tr><th>ID</th><th>标题</th><th>创建时间</th><th></th></tr></thead>
+      <table><thead><tr><th>有效性</th><th>ID</th><th>标题</th><th>创建时间</th><th></th></tr></thead>
         <tbody id="saved-rows"></tbody></table>
     </div>
   </main>
@@ -51,6 +51,7 @@
 <script>
 let problem = null;
 let currentMarkdown = '';
+let solutionRows = [];
 
 initSidebar('report.html');
 
@@ -59,10 +60,14 @@ async function load() {
   if (!id) return;
   problem = await api('/problems/' + id);
   const r = await api(`/problems/${problem.id}/solutions`);
-  document.getElementById('solution-checks').innerHTML = r.solutions.map(s => `
-    <label style="margin:0 16px 8px 0;font-size:13px"><input type="checkbox" value="${s.id}" checked
-      style="width:auto;margin-right:5px">${escapeHtml(solverLabel(s.solver))}</label>`).join('')
-    || '<span class="muted">暂无求解结果。</span>';
+  solutionRows = r.solutions;
+  document.getElementById('solution-checks').innerHTML = r.solutions.map(s => {
+    const info = freshnessInfo(s);
+    return `<label style="margin:0 16px 8px 0;font-size:13px;${info.stale ? 'color:#991b1b' : ''}">
+      <input type="checkbox" value="${s.id}" ${info.stale ? '' : 'checked'}
+      style="width:auto;margin-right:5px">${escapeHtml(solverLabel(s.solver))}
+      <span class="small">(${escapeHtml(s.id.slice(-6))})</span> ${freshnessBadge(s)}</label>`;
+  }).join('') || '<span class="muted">暂无求解结果。</span>';
   const sens = await api(`/problems/${problem.id}/sensitivity`).catch(() => ({ results: [] }));
   document.getElementById('sens-select').innerHTML = '<option value="">— 无 —</option>' +
     sens.results.map(x => `<option value="${x.id}">${escapeHtml(x.parameter)} (${escapeHtml(SOLVER_LABELS[x.solver] || x.solver)})</option>`).join('');
@@ -71,6 +76,9 @@ async function load() {
 
 async function generate() {
   const solution_ids = [...document.querySelectorAll('#solution-checks input:checked')].map(i => i.value);
+  const stalePicked = solutionRows.filter(s => s.id && solution_ids.includes(s.id) && freshnessInfo(s).stale);
+  if (stalePicked.length &&
+      !confirm(`选中的 ${stalePicked.length} 个方案已失效，报告顶部会明确标注警告。仍要生成吗？`)) return;
   const body = { solution_ids, title: document.getElementById('title').value || undefined };
   const sid = document.getElementById('sens-select').value;
   if (sid) body.sensitivity_id = sid;
@@ -96,11 +104,15 @@ function copyMarkdown() {
 
 async function loadSaved() {
   const { reports } = await api(`/problems/${problem.id}/reports`).catch(() => ({ reports: [] }));
-  document.getElementById('saved-rows').innerHTML = reports.map(r => `
-    <tr><td class="mono">${escapeHtml(r.id)}</td><td>${escapeHtml(r.title)}</td>
+  document.getElementById('saved-rows').innerHTML = reports.map(r => {
+    const info = freshnessInfo(r);
+    return `<tr style="${info.stale ? 'background:#fef2f2' : ''}">
+      <td>${freshnessBadge(r)}</td>
+      <td class="mono">${escapeHtml(r.id)}</td><td>${escapeHtml(r.title)}
+        ${info.stale ? `<div class="small" style="color:#991b1b">${info.reasons.slice(0,2).map(escapeHtml).join('；')}</div>` : ''}</td>
       <td class="small muted">${escapeHtml(r.created_at)}</td>
-      <td><button class="btn sm" onclick='viewReport(${JSON.stringify(r.content).replace(/'/g, "&#39;")})'>查看</button></td></tr>`).join('')
-    || '<tr><td colspan="4" class="empty">暂无报告。</td></tr>';
+      <td><button class="btn sm" onclick='viewReport(${JSON.stringify(r.content).replace(/'/g, "&#39;")})'>查看</button></td></tr>`;
+  }).join('') || '<tr><td colspan="5" class="empty">暂无报告。</td></tr>';
 }
 
 function viewReport(content) {

@@ -30,10 +30,12 @@
       <table class="mt">
         <thead><tr>
           <th>ID</th><th>名称</th><th>类型</th><th class="num">容量</th>
-          <th>技能</th><th class="num">单位成本</th><th>可用时段</th><th></th>
+          <th>技能</th><th class="num">单位成本</th><th>可用时段</th><th>来源</th><th></th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
+      <p class="small muted mt" style="margin-bottom:0">
+        标记为「模板」的时段由<a href="calendar.html">班次/日历</a>生成，请在该页统一修改并刷新；这里手填会被记为「手动」，下次刷新会被覆盖。</p>
     </div>
 
     <div class="card" id="form-card" style="display:none">
@@ -58,6 +60,7 @@
 <script src="js/common.js"></script>
 <script>
 let problem = null;
+let calendarInfo = { resources: [] };
 let editing = null;
 const typeSel = document.getElementById('f-type');
 typeSel.innerHTML = RESOURCE_TYPES.map(t => `<option value="${t}">${resourceTypeLabel(t)}</option>`).join('');
@@ -66,13 +69,29 @@ initSidebar('resources.html');
 
 async function load() {
   const id = currentProblemId();
-  if (!id) { document.getElementById('rows').innerHTML = '<tr><td colspan="8" class="empty">未选择问题实例。</td></tr>'; return; }
-  problem = await api('/problems/' + id);
+  if (!id) { document.getElementById('rows').innerHTML = '<tr><td colspan="9" class="empty">未选择问题实例。</td></tr>'; return; }
+  [problem, calendarInfo] = await Promise.all([
+    api('/problems/' + id),
+    api('/problems/' + id + '/calendar').catch(() => ({ resources: [] })),
+  ]);
   render();
 }
 
 function render() {
-  document.getElementById('rows').innerHTML = problem.resources.map(r => `
+  const calByRes = {};
+  for (const r of calendarInfo.resources || []) calByRes[r.id] = r;
+  document.getElementById('rows').innerHTML = problem.resources.map(r => {
+    const source = (r.availability_meta && r.availability_meta.source) || 'manual';
+    const bindings = (calByRes[r.id] && calByRes[r.id].bindings) || [];
+    const calNames = bindings.map(b => {
+      const c = (calendarInfo.calendars || []).find(x => x.id === b.calendar_id);
+      return c ? c.name : b.calendar_id;
+    }).join('、');
+    const sourceTag = source === 'calendar'
+      ? `<span class="badge info avail-calendar" title="由模板生成：${escapeHtml(calNames)}">模板${calNames ? ' · ' + escapeHtml(calNames) : ''}</span>`
+      : (r.availability ? `<span class="badge warn avail-manual">手动</span>`
+                        : `<span class="badge muted">始终可用</span>`);
+    return `
     <tr>
       <td class="mono">${escapeHtml(r.id)}</td>
       <td>${escapeHtml(r.name)}</td>
@@ -81,11 +100,13 @@ function render() {
       <td>${escapeHtml((r.skills || []).join(', ') || '—')}</td>
       <td class="num">${fmt(r.cost_per_unit)}</td>
       <td class="small mono">${escapeHtml(r.availability ? JSON.stringify(r.availability) : '始终可用')}</td>
+      <td>${sourceTag}</td>
       <td>
         <button class="btn sm" onclick='editResource("${escapeHtml(r.id)}")'>编辑</button>
         <button class="btn sm danger" onclick='removeResource("${escapeHtml(r.id)}")'>删除</button>
       </td>
-    </tr>`).join('') || '<tr><td colspan="8" class="empty">暂无资源。</td></tr>';
+    </tr>`;
+  }).join('') || '<tr><td colspan="9" class="empty">暂无资源。</td></tr>';
 }
 
 function showForm() { editing = null; document.getElementById('form-title').textContent = '新增资源';
@@ -118,6 +139,7 @@ function parseAvailability(s) {
 }
 
 function saveForm() {
+  const existing = editing ? problem.resources.find(x => x.id === editing) : null;
   const r = {
     id: document.getElementById('f-id').value.trim(),
     name: document.getElementById('f-name').value.trim(),
@@ -127,12 +149,21 @@ function saveForm() {
     cost_per_unit: parseFloat(document.getElementById('f-cost').value) || 0,
     availability: parseAvailability(document.getElementById('f-avail').value),
   };
+  // Hand-editing a template-generated resource detaches it from the template
+  // until the next calendar refresh (which re-tags and regenerates it).
+  r.availability_meta = existing && existing.availability_meta
+    ? { ...existing.availability_meta } : {};
+  if (existing && JSON.stringify(existing.availability || null) !==
+      JSON.stringify(r.availability || null)) {
+    r.availability_meta = { source: 'manual', note: 'hand-edited in resource form' };
+  }
   if (!r.id) return toast('资源 ID 不能为空', 'error');
   if (editing) {
     const i = problem.resources.findIndex(x => x.id === editing);
     problem.resources[i] = r;
   } else {
     if (problem.resources.some(x => x.id === r.id)) return toast('资源 ID 重复', 'error');
+    if (r.availability) r.availability_meta = { source: 'manual' };
     problem.resources.push(r);
   }
   save().then(() => { hideForm(); render(); });

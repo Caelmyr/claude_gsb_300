@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>班次 / 日历模板 — 排程求解系统</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">排程求解系统</div>
+    <div class="brand-sub">运筹优化与排程求解</div>
+    <nav id="nav"></nav>
+    <div class="section-label">问题实例</div>
+    <select id="problem-picker"></select>
+  </aside>
+  <main class="main">
+    <div class="page-head">
+      <h1>班次 / 日历模板</h1>
+      <span class="sub">定义白班、中班、夜班、周末与节假日，套用到资源后自动生成可用时段</span>
+    </div>
+
+    <div class="card">
+      <div class="flex" style="flex-wrap:wrap;gap:14px">
+        <div><label>槽位 0 对应日期</label><input id="f-start-date" type="date" style="width:160px"></div>
+        <div><label>每天槽位数</label><input id="f-slots" type="number" min="1" style="width:110px"></div>
+        <div style="align-self:flex-end">
+          <button class="btn primary" onclick="saveConfig()">保存模板配置</button>
+        </div>
+        <div class="spacer"></div>
+        <div style="align-self:flex-end">
+          <button class="btn" onclick="previewAll()">预览展开</button>
+          <button class="btn primary" onclick="refreshAll(true)">按模板批量刷新可用时段</button>
+        </div>
+      </div>
+      <p class="small muted mt" style="margin-bottom:0">
+        改模板不会自动覆盖已生成的时段；点「批量刷新」才会写入新版本，并立即标出需要重排的历史结果。
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="flex">
+        <h2 style="margin:0">班次模板</h2>
+        <div class="spacer"></div>
+        <button class="btn sm primary" onclick="editShift(-1)">＋ 新班次</button>
+      </div>
+      <table class="mt">
+        <thead><tr><th>ID</th><th>名称</th><th>颜色</th><th>每日时段（槽位，左闭右开，可跨午夜）</th><th></th></tr></thead>
+        <tbody id="shift-rows"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="flex">
+        <h2 style="margin:0">日历模板（周节奏 + 节假日）</h2>
+        <div class="spacer"></div>
+        <button class="btn sm primary" onclick="editCalendar(-1)">＋ 新日历</button>
+      </div>
+      <table class="mt">
+        <thead><tr><th>ID</th><th>名称</th><th>周节奏</th><th>节假日</th><th></th></tr></thead>
+        <tbody id="calendar-rows"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="flex">
+        <h2 style="margin:0">资源套用（绑定）</h2>
+        <div class="spacer"></div>
+        <button class="btn sm primary" onclick="editBinding(-1)">＋ 套用日期段</button>
+      </div>
+      <table class="mt">
+        <thead><tr><th>绑定 ID</th><th>资源</th><th>日历</th><th>起始日期</th><th>结束日期</th>
+          <th class="num">优先级</th><th></th></tr></thead>
+        <tbody id="binding-rows"></tbody>
+      </table>
+      <p class="small muted">同一天多条绑定时，优先级高者生效；日期留空表示覆盖整个计划周期。</p>
+    </div>
+
+    <div class="card" id="preview-card" style="display:none">
+      <div class="flex">
+        <h2 style="margin:0">展开预览 / 刷新结果</h2>
+        <div class="spacer"></div>
+        <button class="btn sm" onclick="document.getElementById('preview-card').style.display='none'">关闭</button>
+      </div>
+      <div id="preview-body" class="mt"></div>
+      <div id="refresh-freshness" class="mt"></div>
+    </div>
+
+    <!-- shift editor -->
+    <div class="card" id="shift-form" style="display:none">
+      <h2 id="shift-form-title">班次</h2>
+      <div class="form-grid">
+        <div><label>ID</label><input id="sh-id" placeholder="day"></div>
+        <div><label>名称</label><input id="sh-name" placeholder="白班"></div>
+        <div><label>颜色</label><input id="sh-color" type="color" value="#4e79a7"></div>
+        <div class="full"><label>每日时段（开始-结束，逗号分隔，如 8-16；夜班可填 22-26 跨午夜）</label>
+          <input id="sh-segments" placeholder="8-16"></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" onclick="saveShift()">保存</button>
+        <button class="btn" onclick="document.getElementById('shift-form').style.display='none'">取消</button>
+      </div>
+    </div>
+
+    <!-- calendar editor -->
+    <div class="card" id="cal-form" style="display:none">
+      <h2 id="cal-form-title">日历</h2>
+      <div class="form-grid">
+        <div><label>ID</label><input id="ca-id" placeholder="cal_week"></div>
+        <div><label>名称</label><input id="ca-name" placeholder="常白班"></div>
+        <div class="full"><label>说明</label><input id="ca-desc"></div>
+        <div class="full">
+          <label>每周上班的班次（勾选班次 + 星期）</label>
+          <div id="ca-week" class="week-grid"></div>
+        </div>
+        <div class="full">
+          <label>节假日（YYYY-MM-DD，每行一条；值为 closed=全天休息，weekday=按周节奏，或填班次 id 逗号分隔）</label>
+          <textarea id="ca-holidays" rows="3" placeholder="2024-01-01 closed&#10;2024-05-01 day"
+            style="width:100%;font-family:monospace;font-size:12px"></textarea>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" onclick="saveCalendar()">保存</button>
+        <button class="btn" onclick="document.getElementById('cal-form').style.display='none'">取消</button>
+      </div>
+    </div>
+
+    <!-- binding editor -->
+    <div class="card" id="bind-form" style="display:none">
+      <h2 id="bind-form-title">套用日期段</h2>
+      <div class="form-grid">
+        <div><label>绑定 ID</label><input id="b-id" placeholder="b_m1"></div>
+        <div><label>资源</label><select id="b-resource"></select></div>
+        <div><label>日历</label><select id="b-calendar"></select></div>
+        <div><label>起始日期（含，留空=周期开始）</label><input id="b-start" type="date"></div>
+        <div><label>结束日期（含，留空=周期结束）</label><input id="b-end" type="date"></div>
+        <div><label>优先级（高者覆盖）</label><input id="b-prio" type="number" value="0"></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" onclick="saveBinding()">保存</button>
+        <button class="btn" onclick="document.getElementById('bind-form').style.display='none'">取消</button>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="js/common.js"></script>
+<script>
+let data = null;          // /calendar payload
+let editing = { shift: -1, calendar: -1, binding: -1 };
+
+initSidebar('calendar.html');
+
+async function load() {
+  const id = currentProblemId();
+  if (!id) { toast('请先选择问题实例', 'error'); return; }
+  data = await api('/problems/' + id + '/calendar');
+  document.getElementById('f-start-date').value = data.start_date;
+  document.getElementById('f-slots').value = data.slots_per_day;
+  render();
+}
+
+/* ---- rendering ------------------------------------------------------- */
+function shiftChip(sid) {
+  const s = data.shifts.find(x => x.id === sid);
+  if (!s) return `<span class="badge bad">未知班次 ${escapeHtml(sid)}</span>`;
+  return `<span class="shift-chip"><span class="dot" style="background:${s.color || '#999'}"></span>${escapeHtml(s.name)}</span>`;
+}
+
+function render() {
+  document.getElementById('shift-rows').innerHTML = data.shifts.map((s, i) => `
+    <tr><td class="mono">${escapeHtml(s.id)}</td><td>${escapeHtml(s.name)}</td>
+      <td><span class="dot" style="display:inline-block;width:12px;height:12px;border-radius:3px;background:${s.color || '#999'}"></span></td>
+      <td class="mono small">${(s.segments || []).map(a => a.join('-')).join(', ')}</td>
+      <td><button class="btn sm" onclick="editShift(${i})">编辑</button>
+          <button class="btn sm danger" onclick="delShift(${i})">删除</button></td></tr>`).join('')
+    || `<tr><td colspan="5" class="empty">还没有班次模板。</td></tr>`;
+
+  document.getElementById('calendar-rows').innerHTML = data.calendars.map((c, i) => `
+    <tr><td class="mono">${escapeHtml(c.id)}</td><td>${escapeHtml(c.name)}</td>
+      <td>${WEEKDAYS.map(w => {
+        const plan = c.weekday_shifts[String(w.index)];
+        const closed = !plan || (Array.isArray(plan) && plan.length === 0);
+        return `<span class="badge ${closed ? 'muted' : 'info'}" title="${w.label}">${w.label.replace('周', '')}</span>`;
+      }).join(' ')}</td>
+      <td class="small">${Object.entries(c.holidays || {}).map(([d, p]) =>
+        `${escapeHtml(d)}: ${p === 'closed' ? '休息' : p === 'weekday' ? '按周' : escapeHtml((p || []).join('/'))}`).join('；') || '—'}</td>
+      <td><button class="btn sm" onclick="editCalendar(${i})">编辑</button>
+          <button class="btn sm danger" onclick="delCalendar(${i})">删除</button></td></tr>`).join('')
+    || `<tr><td colspan="5" class="empty">还没有日历模板。</td></tr>`;
+
+  const resName = rid => { const r = data.resources.find(x => x.id === rid); return r ? (r.name || rid) : rid; };
+  const calName = cid => { const c = data.calendars.find(x => x.id === cid); return c ? c.name : cid; };
+  document.getElementById('binding-rows').innerHTML = data.bindings.map((b, i) => `
+    <tr><td class="mono small">${escapeHtml(b.id)}</td>
+      <td>${escapeHtml(resName(b.resource_id))} <span class="muted small mono">(${escapeHtml(b.resource_id)})</span></td>
+      <td>${escapeHtml(calName(b.calendar_id))} <span class="muted small mono">(${escapeHtml(b.calendar_id)})</span></td>
+      <td class="small">${escapeHtml(b.start_date || '…')}</td><td class="small">${escapeHtml(b.end_date || '…')}</td>
+      <td class="num">${b.priority}</td>
+      <td><button class="btn sm" onclick="editBinding(${i})">编辑</button>
+          <button class="btn sm danger" onclick="delBinding(${i})">删除</button></td></tr>`).join('')
+    || `<tr><td colspan="7" class="empty">还没有资源套用；绑定后刷新即可生成时段。</td></tr>`;
+}
+
+/* ---- shift editor ---------------------------------------------------- */
+function editShift(i) {
+  editing.shift = i;
+  const s = i >= 0 ? data.shifts[i] : { id: '', name: '', color: '#4e79a7', segments: [] };
+  document.getElementById('shift-form-title').textContent = i >= 0 ? '编辑班次' : '新班次';
+  shId.disabled = i >= 0;
+  shId.value = s.id; shName.value = s.name; shColor.value = s.color || '#4e79a7';
+  shSegments.value = (s.segments || []).map(a => a.join('-')).join(', ');
+  document.getElementById('shift-form').style.display = 'block';
+  shId.focus();
+}
+function saveShift() {
+  const segs = shSegments.value.split(',').map(x => x.trim()).filter(Boolean).map(x => {
+    const [a, b] = x.split('-').map(Number);
+    return [a, b];
+  });
+  const obj = { id: shId.value.trim(), name: shName.value.trim(), color: shColor.value, segments: segs };
+  if (!obj.id) return toast('班次 ID 不能为空', 'error');
+  if (segs.some(([a, b]) => !(b > a))) return toast('时段格式应为 开始-结束，且结束 &gt; 开始', 'error');
+  if (editing.shift >= 0) data.shifts[editing.shift] = obj;
+  else { if (data.shifts.some(s => s.id === obj.id)) return toast('班次 ID 重复', 'error'); data.shifts.push(obj); }
+  document.getElementById('shift-form').style.display = 'none';
+}
+function delShift(i) {
+  const s = data.shifts[i];
+  if (data.calendars.some(c => JSON.stringify(c.weekday_shifts).includes(s.id)))
+    return toast('该班次仍被日历引用，请先移除引用', 'error');
+  if (!confirm(`删除班次 ${s.id}？`)) return;
+  data.shifts.splice(i, 1); render();
+}
+
+/* ---- calendar editor ------------------------------------------------- */
+function buildWeekGrid(cal) {
+  document.getElementById('ca-week').innerHTML = WEEKDAYS.map(w => {
+    const plan = (cal && cal.weekday_shifts[String(w.index)]) || [];
+    const active = Array.isArray(plan) ? plan : [];
+    const checks = data.shifts.map(s =>
+      `<label><input type="checkbox" data-w="${w.index}" data-s="${s.id}" ${active.includes(s.id) ? 'checked' : ''}>
+        <span class="dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${s.color || '#999'}"></span>${escapeHtml(s.name)}</label>`
+    ).join('') || '<span class="muted small">请先建班次</span>';
+    return `<div class="week-cell ${active.length ? '' : 'closed'}"><h4>${w.label}${active.length ? '' : '（休息）'}</h4>${checks}</div>`;
+  }).join('');
+}
+function editCalendar(i) {
+  editing.calendar = i;
+  const c = i >= 0 ? data.calendars[i] : { id: '', name: '', description: '', weekday_shifts: {}, holidays: {} };
+  document.getElementById('cal-form-title').textContent = i >= 0 ? '编辑日历' : '新日历';
+  caId.disabled = i >= 0;
+  caId.value = c.id; caName.value = c.name; caDesc.value = c.description || '';
+  caHolidays.value = Object.entries(c.holidays || {}).map(([d, p]) =>
+    `${d} ${Array.isArray(p) ? p.join(',') : p}`).join('\n');
+  buildWeekGrid(c);
+  document.getElementById('cal-form').style.display = 'block';
+}
+function saveCalendar() {
+  const weekday_shifts = {};
+  WEEKDAYS.forEach(w => {
+    const ids = [...document.querySelectorAll(`#ca-week input[data-w="${w.index}"]:checked`)].map(x => x.dataset.s);
+    weekday_shifts[String(w.index)] = ids;
+  });
+  const holidays = {};
+  for (const line of caHolidays.value.split('\n').map(s => s.trim()).filter(Boolean)) {
+    const sp = line.split(/\s+/);
+    const date = sp[0]; let val = sp.slice(1).join('').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return toast(`节假日日期格式错误：${date}`, 'error');
+    if (val === DAY_PLAN_CLOSED || val === '') val = DAY_PLAN_CLOSED;
+    else if (val !== DAY_PLAN_WEEKDAY) val = val.split(',').map(s => s.trim()).filter(Boolean);
+    holidays[date] = val;
+  }
+  const obj = { id: caId.value.trim(), name: caName.value.trim(), description: caDesc.value.trim(),
+                weekday_shifts, holidays };
+  if (!obj.id) return toast('日历 ID 不能为空', 'error');
+  if (editing.calendar >= 0) data.calendars[editing.calendar] = obj;
+  else { if (data.calendars.some(c => c.id === obj.id)) return toast('日历 ID 重复', 'error'); data.calendars.push(obj); }
+  document.getElementById('cal-form').style.display = 'none';
+  render();
+}
+function delCalendar(i) {
+  const c = data.calendars[i];
+  if (data.bindings.some(b => b.calendar_id === c.id))
+    return toast('该日历仍被资源绑定，请先删除绑定', 'error');
+  if (!confirm(`删除日历 ${c.id}？`)) return;
+  data.calendars.splice(i, 1); render();
+}
+
+/* ---- binding editor -------------------------------------------------- */
+function editBinding(i) {
+  editing.binding = i;
+  const b = i >= 0 ? data.bindings[i] : { id: '', resource_id: '', calendar_id: '', start_date: '', end_date: '', priority: 0 };
+  document.getElementById('bind-form-title').textContent = i >= 0 ? '编辑套用' : '套用日期段';
+  bId.disabled = i >= 0;
+  bId.value = b.id || ('b_' + (b.resource_id || 'r') + '_' + (data.bindings.length + 1));
+  bResource.innerHTML = data.resources.map(r => `<option value="${r.id}">${escapeHtml(r.name || r.id)} (${r.id})</option>`).join('');
+  bCalendar.innerHTML = data.calendars.map(c => `<option value="${c.id}">${escapeHtml(c.name || c.id)} (${c.id})</option>`).join('');
+  bResource.value = b.resource_id; bCalendar.value = b.calendar_id;
+  bStart.value = b.start_date || ''; bEnd.value = b.end_date || ''; bPrio.value = b.priority || 0;
+  document.getElementById('bind-form').style.display = 'block';
+}
+function saveBinding() {
+  const obj = {
+    id: bId.value.trim(),
+    resource_id: bResource.value, calendar_id: bCalendar.value,
+    start_date: bStart.value || null, end_date: bEnd.value || null,
+    priority: parseInt(bPrio.value || '0', 10),
+  };
+  if (!obj.id) return toast('绑定 ID 不能为空', 'error');
+  if (!obj.resource_id) return toast('请选择资源', 'error');
+  if (!obj.calendar_id) return toast('请选择日历', 'error');
+  if (obj.start_date && obj.end_date && obj.start_date > obj.end_date)
+    return toast('起始日期不能晚于结束日期', 'error');
+  if (editing.binding >= 0) data.bindings[editing.binding] = obj;
+  else { if (data.bindings.some(x => x.id === obj.id)) return toast('绑定 ID 重复', 'error'); data.bindings.push(obj); }
+  document.getElementById('bind-form').style.display = 'none';
+  render();
+}
+function delBinding(i) {
+  if (!confirm('删除该套用？（刷新后该资源不再由模板生成时段）')) return;
+  data.bindings.splice(i, 1); render();
+}
+
+/* ---- persist / preview / refresh ------------------------------------- */
+async function saveConfig() {
+  const payload = {
+    start_date: document.getElementById('f-start-date').value,
+    slots_per_day: parseInt(document.getElementById('f-slots').value, 10),
+    shifts: data.shifts, calendars: data.calendars, bindings: data.bindings,
+  };
+  try {
+    const res = await api(`/problems/${currentProblemId()}/calendar`,
+      { method: 'PUT', body: JSON.stringify(payload) });
+    data = res;
+    render();
+    const n = (res.pending_refresh || []).length;
+    toast(n ? `模板已保存（v${res.problem_version}）；${n} 个资源待刷新` : `模板已保存（v${res.problem_version}）`);
+    if (n) renderPreviewRows(res.pending_refresh, true);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function previewAll() {
+  const res = await api(`/problems/${currentProblemId()}/calendar/preview`, {
+    method: 'POST', body: JSON.stringify({
+      shifts: data.shifts, calendars: data.calendars, bindings: data.bindings,
+      start_date: document.getElementById('f-start-date').value,
+      slots_per_day: parseInt(document.getElementById('f-slots').value, 10),
+    }),
+  });
+  renderPreviewRows(res.rows, true);
+}
+
+function renderPreviewRows(rows, unsavedNote) {
+  const card = document.getElementById('preview-card');
+  card.style.display = 'block';
+  const totalSlots = data.horizon;
+  document.getElementById('preview-body').innerHTML = `
+    <p class="small muted">${unsavedNote ? '基于当前编辑内容（未保存也可预览）。' : ''}
+      色条为各资源在计划周期 [0, ${totalSlots}) 内的可用时段。</p>
+    <div>${rows.map(r => timelineRow(r, totalSlots)).join('')}</div>`;
+  document.getElementById('refresh-freshness').innerHTML = '';
+}
+
+function timelineRow(row, total) {
+  const segs = (row.intervals || []).map(([a, b]) =>
+    `<div class="timeline-seg" style="left:${(100 * a / total).toFixed(2)}%;width:${(100 * (b - a) / total).toFixed(2)}%"></div>`).join('');
+  const ivText = (row.intervals || []).map(a => a.join('-')).join(', ') || '（全天不可用）';
+  const tag = row.changed
+    ? `<span class="badge ${row.manual_overwrite ? 'warn' : 'bad'}">${row.manual_overwrite ? '将覆盖手填' : '将变化'}</span>`
+    : `<span class="badge ok">无变化</span>`;
+  return `<div class="cal-ruler mt">
+      <div><b class="mono">${escapeHtml(row.resource_id)}</b> ${tag}</div>
+      <div class="timeline-track" title="${escapeHtml(ivText)}">${segs}</div>
+    </div>
+    <div class="small muted" style="margin:2px 0 8px 148px">${escapeHtml(ivText)}</div>`;
+}
+
+async function refreshAll(confirmFirst) {
+  if (confirmFirst) {
+    // persist any pending template edits first so refresh uses them
+    await saveConfigQuiet();
+    if (!confirm('将按模板重新生成所有绑定资源的可用时段，并创建新的实例版本。\n刷新后会立即标出需要重排的历史结果。继续？')) return;
+  }
+  const res = await api(`/problems/${currentProblemId()}/calendar/refresh`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  data = await api('/problems/' + currentProblemId() + '/calendar');
+  render();
+  const rows = res.changed.map(c => ({
+    resource_id: c.resource_id,
+    intervals: (data.resources.find(r => r.id === c.resource_id) || {}).availability,
+    changed: false,
+  }));
+  renderPreviewRows(rows, false);
+  showRefreshOutcome(res);
+  toast(`已刷新：${res.n_changed} 个资源变化，实例升至 v${res.problem_version}`);
+}
+
+async function saveConfigQuiet() {
+  const res = await api(`/problems/${currentProblemId()}/calendar`, {
+    method: 'PUT', body: JSON.stringify({
+      shifts: data.shifts, calendars: data.calendars, bindings: data.bindings,
+      start_date: document.getElementById('f-start-date').value,
+      slots_per_day: parseInt(document.getElementById('f-slots').value, 10),
+    }),
+  });
+  data = res;
+}
+
+function showRefreshOutcome(res) {
+  const c = res.freshness.counts;
+  const box = document.getElementById('refresh-freshness');
+  if (!c.stale_total) {
+    box.innerHTML = `<div class="badge ok" style="font-size:13px;padding:6px 12px">✓ 刷新完成，所有历史方案 / 分析 / 报告仍基于当前输入，无需重排。</div>`;
+    return;
+  }
+  const groups = [
+    ['排程方案', res.freshness.solutions],
+    ['敏感性分析', res.freshness.sensitivity],
+    ['报告', res.freshness.reports],
+  ];
+  box.innerHTML = `
+    <div class="stale-banner" style="margin:0">
+      <div class="stale-banner-head">⚠️ ${c.stale_total} 个历史结果因班次变化需要重跑
+        （方案 ${c.solutions_stale}/${c.solutions_total}，分析 ${c.sensitivity_stale}/${c.sensitivity_total}，报告 ${c.reports_stale}/${c.reports_total}）</div>
+      <ul class="stale-banner-list">
+        ${groups.map(([label, rows]) => rows.filter(r => r.stale).map(r =>
+          `<li><b>${label} ${escapeHtml(r.id)}</b> ${freshnessBadge(r)}${freshnessReasons((r.stale_reasons || []).slice(0, 3))}</li>`
+        ).join('')).join('')}
+      </ul>
+    </div>`;
+}
+
+load().catch(e => toast(e.message, 'error'));
+</script>
+</body>
+</html>

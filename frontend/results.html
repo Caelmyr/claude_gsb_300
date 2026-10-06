@@ -29,7 +29,7 @@
     <div class="card">
       <h2>求解方案</h2>
       <table><thead><tr>
-        <th>求解器</th><th>状态</th><th class="num">目标值</th><th class="num">完工时间</th>
+        <th>有效性</th><th>求解器</th><th>状态</th><th class="num">目标值</th><th class="num">完工时间</th>
         <th class="num">拖期</th><th class="num">成本</th><th class="num">耗时(s)</th><th></th>
       </tr></thead><tbody id="rows"></tbody></table>
     </div>
@@ -72,8 +72,11 @@ async function loadSolutions() {
 }
 
 function renderTable() {
-  document.getElementById('rows').innerHTML = solutions.map(s => `
-    <tr style="cursor:pointer" onclick="showDetail('${s.id}')">
+  document.getElementById('rows').innerHTML = solutions.map(s => {
+    const info = freshnessInfo(s);
+    return `
+    <tr style="cursor:pointer;${info.stale ? 'background:#fef2f2' : ''}" onclick="showDetail('${s.id}')">
+      <td>${freshnessBadge(s)}</td>
       <td>${escapeHtml(solverLabel(s.solver))}</td>
       <td>${statusBadge(s.status)}</td>
       <td class="num"><b>${fmt(s.objective_value)}</b></td>
@@ -82,7 +85,10 @@ function renderTable() {
       <td class="num">${fmt(s.metrics?.resource_cost)}</td>
       <td class="num">${fmt(s.solve_time)}</td>
       <td><button class="btn sm" onclick="event.stopPropagation();loadDetail('${s.id}')">查看</button></td>
-    </tr>`).join('') || '<tr><td colspan="8" class="empty">暂无求解结果。</td></tr>';
+    </tr>
+    ${info.stale ? `<tr style="background:#fef2f2"><td colspan="9" class="small" style="color:#991b1b">
+      该方案基于旧输入，重排前请勿执行：${info.reasons.map(escapeHtml).join('；')}</td></tr>` : ''}`;
+  }).join('') || '<tr><td colspan="9" class="empty">暂无求解结果。</td></tr>';
 }
 
 function renderObjectiveChart() {
@@ -101,7 +107,10 @@ async function loadDetail(id) {
   selectedId = id;
   const s = await api(`/problems/${problem.id}/solutions/${id}`);
   document.getElementById('detail-card').style.display = 'block';
-  document.getElementById('detail-title').textContent = `方案详情 — ${solverLabel(s.solver)}`;
+  const info = freshnessInfo(s);
+  document.getElementById('detail-title').innerHTML =
+    `方案详情 — ${solverLabel(s.solver)} ${freshnessBadge(s)}`
+    + (info.stale ? `<span class="small" style="color:#991b1b;margin-left:10px">该方案已失效：${info.reasons.map(escapeHtml).join('；')}，请用当前班次重新求解</span>` : '');
   document.getElementById('detail-stats').innerHTML = [
     ['目标值', fmt(s.objective_value)], ['完工时间', fmt(s.makespan)],
     ['状态', statusLabel(s.status)], ['耗时', fmt(s.solve_time) + 's'],
